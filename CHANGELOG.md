@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.0
 
 - Added `compact` module providing more efficient representations of common
   standard library types.
