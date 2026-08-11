@@ -40,6 +40,25 @@ assert_eq!(original, deserialized);
 
 ## Encoding Configurations
 
+Postbag provides two configurations: `Full` and `Slim`.
+Use the convenience functions `to_full_vec`, `from_full_slice`, `to_slim_vec` and
+`from_slim_slice`, or pass a configuration value to `to_vec`, `from_slice`,
+`serialize` and `deserialize`:
+
+```rust
+# use serde::{Serialize, Deserialize};
+# #[derive(Serialize, Deserialize, Debug, PartialEq)]
+# struct Person { name: String, age: u32 }
+# let person = Person { name: "Alice".to_string(), age: 30 };
+use postbag::{cfg::Slim, to_vec, from_slice};
+
+let bytes = to_vec(Slim::new(), &person).unwrap();
+let deserialized: Person = from_slice(Slim::new(), &bytes).unwrap();
+assert_eq!(person, deserialized);
+```
+
+The configuration also carries the [nesting depth limit](#nesting-depth-limit).
+
 ### `Full` Configuration
 
 The `Full` configuration provides maximum compatibility and schema evolution capabilities:
@@ -100,7 +119,7 @@ The `Slim` configuration prioritizes performance and compact size:
 - **Fast processing**: No string lookups during serialization/deserialization  
 - **Limited schema evolution**: Fields/variants can only be added/removed at the end
 
-**Supported changes** when using them `Slim` configuration:
+**Supported changes** when using the `Slim` configuration:
 - Adding fields to the end of structs (with serde defaults for deserialization)
 - Removing fields from the end of structs (with serde defaults for deserialization)
 - Adding enum variants at the end

@@ -24,7 +24,7 @@ pub enum Error {
     BadLen,
     /// Bad identifier
     BadIdentifier,
-    /// Recursion limit exceeded while deserializing deeply nested data
+    /// Recursion limit exceeded while (de-)serializing deeply nested data
     RecursionLimit,
     /// Overflow of target usize
     UsizeOverflow,
