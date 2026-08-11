@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 #![doc(
-    html_logo_url = "https://raw.githubusercontent.com/remoc-rs/postbag/master/.misc/postbag.png",
-    html_favicon_url = "https://raw.githubusercontent.com/remoc-rs/postbag/master/.misc/postbag.png"
+    html_logo_url = "https://raw.githubusercontent.com/remoc-rs/postbag/main/.misc/postbag.png",
+    html_favicon_url = "https://raw.githubusercontent.com/remoc-rs/postbag/main/.misc/postbag.png"
 )]
 #![doc = include_str!("../README.md")]
 

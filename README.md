@@ -137,7 +137,7 @@ Postbag started as a fork of [postcard](https://github.com/jamesmunns/postcard) 
 
 Postbag is licensed under the [Apache 2.0 license].
 
-[Apache 2.0 license]: https://github.com/surban/postbag/blob/master/LICENSE
+[Apache 2.0 license]: https://github.com/remoc-rs/postbag/blob/main/LICENSE
 
 ### Contribution
 
