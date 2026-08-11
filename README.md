@@ -1,4 +1,4 @@
-# Postbag
+# Postbag 💼
 
 [![Crates.io](https://img.shields.io/crates/v/postbag.svg)](https://crates.io/crates/postbag)
 [![Documentation](https://docs.rs/postbag/badge.svg)](https://docs.rs/postbag)
