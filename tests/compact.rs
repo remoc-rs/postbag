@@ -11,11 +11,30 @@ use postbag::{
     compact::Compactable,
     deserialize, serialize,
 };
+use serde::de::DeserializeOwned;
 
 /// Wrapper serializing its value using its compacted representation.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(bound = "T: Compactable + Clone")]
+#[serde(bound(
+    serialize = "T: Compactable + Clone, T::Compacted: Serialize",
+    deserialize = "T: Compactable + Clone, T::Compacted: Deserialize<'de>"
+))]
 struct Compact<T: Compactable + Clone>(#[serde(with = "postbag::compact")] T);
+
+/// A value whose compacted representation can be checked by the helpers of
+/// this test.
+trait Checkable: Compactable + Clone + Serialize + DeserializeOwned + Debug + PartialEq
+where
+    Self::Compacted: Serialize + DeserializeOwned,
+{
+}
+
+impl<T> Checkable for T
+where
+    T: Compactable + Clone + Serialize + DeserializeOwned + Debug + PartialEq,
+    T::Compacted: Serialize + DeserializeOwned,
+{
+}
 
 /// Serializes the value directly and using its compacted representation,
 /// verifying that the compacted representation loops back.
@@ -25,7 +44,8 @@ struct Compact<T: Compactable + Clone>(#[serde(with = "postbag::compact")] T);
 #[track_caller]
 fn compact_loopback_with_cfg<T, CFG>(value: &T, check_size: bool)
 where
-    T: Compactable + Clone + Debug + PartialEq,
+    T: Checkable,
+    T::Compacted: Serialize + DeserializeOwned,
     CFG: Cfg,
 {
     let mut plain = Vec::new();
@@ -57,7 +77,8 @@ where
 #[track_caller]
 fn compact_loopback<T>(value: T)
 where
-    T: Compactable + Clone + Debug + PartialEq,
+    T: Checkable,
+    T::Compacted: Serialize + DeserializeOwned,
 {
     compact_loopback_with_cfg::<_, Full>(&value, true);
     compact_loopback_with_cfg::<_, Slim>(&value, true);
@@ -68,7 +89,8 @@ where
 #[track_caller]
 fn compact_loopback_unchecked_size<T>(value: T)
 where
-    T: Compactable + Clone + Debug + PartialEq,
+    T: Checkable,
+    T::Compacted: Serialize + DeserializeOwned,
 {
     compact_loopback_with_cfg::<_, Full>(&value, false);
     compact_loopback_with_cfg::<_, Slim>(&value, false);
@@ -78,6 +100,7 @@ where
 fn to_compact_vec<T, CFG>(value: &T) -> Vec<u8>
 where
     T: Compactable + Clone,
+    T::Compacted: Serialize,
     CFG: Cfg,
 {
     let mut compact = Vec::new();
@@ -89,6 +112,7 @@ where
 fn from_compact_slice<T, CFG>(data: &[u8]) -> postbag::Result<T>
 where
     T: Compactable + Clone,
+    T::Compacted: DeserializeOwned,
     CFG: Cfg,
 {
     deserialize::<CFG, _, Compact<T>>(data).map(|value| value.0)

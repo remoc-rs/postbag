@@ -24,12 +24,12 @@
 //! }
 //! ```
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// A type that can use a compacted representation for serialization.
-pub trait Compactable: Serialize + DeserializeOwned {
+pub trait Compactable: Sized {
     /// Type of compacted representation.
-    type Compacted: Serialize + DeserializeOwned + From<Self> + Into<Self>;
+    type Compacted: From<Self> + Into<Self>;
 
     /// Transform into compacted representation.
     fn into_compacted(self) -> Self::Compacted {
@@ -46,6 +46,7 @@ pub trait Compactable: Serialize + DeserializeOwned {
 pub fn serialize<T, S>(value: &T, serializer: S) -> std::result::Result<S::Ok, S::Error>
 where
     T: Compactable + Clone,
+    <T as Compactable>::Compacted: Serialize,
     S: Serializer,
 {
     let compacted = value.clone().into_compacted();
@@ -56,6 +57,7 @@ where
 pub fn deserialize<'de, T, D>(deserializer: D) -> std::result::Result<T, D::Error>
 where
     T: Compactable,
+    <T as Compactable>::Compacted: Deserialize<'de>,
     D: Deserializer<'de>,
 {
     let compacted = T::Compacted::deserialize(deserializer)?;
@@ -91,11 +93,7 @@ impl<T, E> From<Result<T, E>> for std::result::Result<T, E> {
     }
 }
 
-impl<T, E> Compactable for std::result::Result<T, E>
-where
-    T: Serialize + DeserializeOwned,
-    E: Serialize + DeserializeOwned,
-{
+impl<T, E> Compactable for std::result::Result<T, E> {
     type Compacted = Result<T, E>;
 }
 
@@ -237,10 +235,7 @@ impl<Idx> From<Range<Idx>> for std::ops::Range<Idx> {
     }
 }
 
-impl<Idx> Compactable for std::ops::Range<Idx>
-where
-    Idx: Serialize + DeserializeOwned,
-{
+impl<Idx> Compactable for std::ops::Range<Idx> {
     type Compacted = Range<Idx>;
 }
 
@@ -261,10 +256,7 @@ impl<Idx> From<RangeInclusive<Idx>> for std::ops::RangeInclusive<Idx> {
     }
 }
 
-impl<Idx> Compactable for std::ops::RangeInclusive<Idx>
-where
-    Idx: Serialize + DeserializeOwned,
-{
+impl<Idx> Compactable for std::ops::RangeInclusive<Idx> {
     type Compacted = RangeInclusive<Idx>;
 }
 
@@ -284,10 +276,7 @@ impl<Idx> From<RangeFrom<Idx>> for std::ops::RangeFrom<Idx> {
     }
 }
 
-impl<Idx> Compactable for std::ops::RangeFrom<Idx>
-where
-    Idx: Serialize + DeserializeOwned,
-{
+impl<Idx> Compactable for std::ops::RangeFrom<Idx> {
     type Compacted = RangeFrom<Idx>;
 }
 
@@ -307,10 +296,7 @@ impl<Idx> From<RangeTo<Idx>> for std::ops::RangeTo<Idx> {
     }
 }
 
-impl<Idx> Compactable for std::ops::RangeTo<Idx>
-where
-    Idx: Serialize + DeserializeOwned,
-{
+impl<Idx> Compactable for std::ops::RangeTo<Idx> {
     type Compacted = RangeTo<Idx>;
 }
 
@@ -348,10 +334,7 @@ impl<T> From<Bound<T>> for std::ops::Bound<T> {
     }
 }
 
-impl<T> Compactable for std::ops::Bound<T>
-where
-    T: Serialize + DeserializeOwned,
-{
+impl<T> Compactable for std::ops::Bound<T> {
     type Compacted = Bound<T>;
 }
 
