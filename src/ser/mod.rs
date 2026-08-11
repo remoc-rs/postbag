@@ -1,15 +1,20 @@
 use serde::Serialize;
 
-use crate::{cfg::Cfg, error::Result, ser::serializer::Serializer};
+use crate::{
+    cfg::{Cfg, Full, Slim},
+    error::Result,
+    ser::serializer::Serializer,
+};
 
 pub(crate) mod serializer;
 pub(crate) mod skippable;
 
-/// Serialize a value of type `T` to a [`std::io::Write`].
+/// Serialize a value of type `T` to a [`std::io::Write`] using the specified
+/// configuration.
 ///
-/// The `CFG` parameter controls the serialization format and can be either:
-/// - [`Full`](crate::cfg::Full): Serializes struct field identifiers and enum variant identifiers as strings
-/// - [`Slim`](crate::cfg::Slim): Serializes without identifiers, using indices for enum variants
+/// Use [`Full`] to serialize struct field identifiers and enum variant
+/// identifiers, or [`Slim`] to serialize without identifiers, using indices for
+/// enum variants.
 ///
 /// # Example
 ///
@@ -29,24 +34,59 @@ pub(crate) mod skippable;
 /// };
 ///
 /// let mut buffer = Vec::new();
-/// serialize::<Full, _, _>(&mut buffer, &person).unwrap();
+/// serialize(Full::new(), &mut buffer, &person).unwrap();
 /// println!("Serialized {} bytes", buffer.len());
 /// ```
-pub fn serialize<CFG, W, T>(writer: W, value: &T) -> Result<()>
+pub fn serialize<W, T, const WITH_IDENTS: bool>(cfg: Cfg<WITH_IDENTS>, writer: W, value: &T) -> Result<()>
 where
-    CFG: Cfg,
     W: std::io::Write,
     T: Serialize + ?Sized,
 {
-    let mut serializer = Serializer::<W, CFG>::new(writer);
-    value.serialize(&mut serializer)?;
+    let mut serializer = Serializer::<W, WITH_IDENTS>::new(writer, cfg);
+    // The root value occupies one nesting level, mirroring the deserializer,
+    // which charges a level for entering a container even when that container
+    // turns out to be empty (an empty struct or a unit enum variant). Without
+    // this, serialization would accept values one level deeper than
+    // deserialization, breaking round-tripping at the limit boundary.
+    serializer.recurse(|ser| value.serialize(ser))?;
     serializer.finalize();
     Ok(())
 }
 
-/// Serialize a value using the [`Full`](crate::cfg::Full) configuration.
+/// Serialize a value using the specified configuration and return a `Vec<u8>`.
 ///
-/// This is a convenience function equivalent to `serialize::<Full, _, _>(writer, value)`.
+/// # Example
+///
+/// ```rust
+/// use serde::{Serialize, Deserialize};
+/// use postbag::{to_vec, cfg::Slim};
+///
+/// #[derive(Serialize, Deserialize)]
+/// struct Person {
+///     name: String,
+///     age: u32,
+/// }
+///
+/// let person = Person {
+///     name: "Alice".to_string(),
+///     age: 30,
+/// };
+///
+/// let bytes = to_vec(Slim::new(), &person).unwrap();
+/// println!("Serialized {} bytes", bytes.len());
+/// ```
+pub fn to_vec<T, const WITH_IDENTS: bool>(cfg: Cfg<WITH_IDENTS>, value: &T) -> Result<Vec<u8>>
+where
+    T: Serialize + ?Sized,
+{
+    let mut buffer = Vec::new();
+    serialize(cfg, &mut buffer, value)?;
+    Ok(buffer)
+}
+
+/// Serialize a value using the [`Full`] configuration.
+///
+/// This is a convenience function equivalent to `serialize(Full::new(), writer, value)`.
 /// It serializes struct field identifiers and enum variant identifiers as strings.
 ///
 /// # Example
@@ -74,12 +114,12 @@ where
     W: std::io::Write,
     T: Serialize + ?Sized,
 {
-    serialize::<crate::cfg::Full, W, T>(writer, value)
+    serialize(Full::new(), writer, value)
 }
 
-/// Serialize a value using the [`Slim`](crate::cfg::Slim) configuration.
+/// Serialize a value using the [`Slim`] configuration.
 ///
-/// This is a convenience function equivalent to `serialize::<Slim, _, _>(writer, value)`.
+/// This is a convenience function equivalent to `serialize(Slim::new(), writer, value)`.
 /// It serializes without identifiers, using indices for enum variants.
 ///
 /// # Example
@@ -107,12 +147,12 @@ where
     W: std::io::Write,
     T: Serialize + ?Sized,
 {
-    serialize::<crate::cfg::Slim, W, T>(writer, value)
+    serialize(Slim::new(), writer, value)
 }
 
-/// Serialize a value using the [`Full`](crate::cfg::Full) configuration and return a `Vec<u8>`.
+/// Serialize a value using the [`Full`] configuration and return a `Vec<u8>`.
 ///
-/// This is a convenience function that creates a new `Vec<u8>` and calls `serialize_full` on it.
+/// This is a convenience function equivalent to `to_vec(Full::new(), value)`.
 /// It serializes struct field identifiers and enum variant identifiers as strings.
 ///
 /// # Example
@@ -139,14 +179,12 @@ pub fn to_full_vec<T>(value: &T) -> Result<Vec<u8>>
 where
     T: Serialize + ?Sized,
 {
-    let mut buffer = Vec::new();
-    serialize_full(&mut buffer, value)?;
-    Ok(buffer)
+    to_vec(Full::new(), value)
 }
 
-/// Serialize a value using the [`Slim`](crate::cfg::Slim) configuration and return a `Vec<u8>`.
+/// Serialize a value using the [`Slim`] configuration and return a `Vec<u8>`.
 ///
-/// This is a convenience function that creates a new `Vec<u8>` and calls `serialize_slim` on it.
+/// This is a convenience function equivalent to `to_vec(Slim::new(), value)`.
 /// It serializes without identifiers, using indices for enum variants.
 ///
 /// # Example
@@ -173,7 +211,5 @@ pub fn to_slim_vec<T>(value: &T) -> Result<Vec<u8>>
 where
     T: Serialize + ?Sized,
 {
-    let mut buffer = Vec::new();
-    serialize_slim(&mut buffer, value)?;
-    Ok(buffer)
+    to_vec(Slim::new(), value)
 }

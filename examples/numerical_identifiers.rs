@@ -25,18 +25,18 @@ fn main() {
 
     // Serialize both versions
     let mut regular_buffer = Vec::new();
-    serialize::<Full, _, _>(&mut regular_buffer, &data_regular).unwrap();
+    serialize(Full::new(), &mut regular_buffer, &data_regular).unwrap();
 
     let mut compact_buffer = Vec::new();
-    serialize::<Full, _, _>(&mut compact_buffer, &data_compact).unwrap();
+    serialize(Full::new(), &mut compact_buffer, &data_compact).unwrap();
 
     println!("Regular field names: {} bytes", regular_buffer.len());
     println!("Compact field names: {} bytes", compact_buffer.len());
     println!("Space saved: {} bytes", regular_buffer.len() - compact_buffer.len());
 
     // Verify both can be deserialized correctly
-    let regular_deserialized: RegularData = deserialize::<Full, _, _>(regular_buffer.as_slice()).unwrap();
-    let compact_deserialized: CompactData = deserialize::<Full, _, _>(compact_buffer.as_slice()).unwrap();
+    let regular_deserialized: RegularData = deserialize(Full::new(), regular_buffer.as_slice()).unwrap();
+    let compact_deserialized: CompactData = deserialize(Full::new(), compact_buffer.as_slice()).unwrap();
 
     assert_eq!(data_regular, regular_deserialized);
     assert_eq!(data_compact, compact_deserialized);

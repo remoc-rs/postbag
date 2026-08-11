@@ -1,4 +1,4 @@
-use std::{io::Write, marker::PhantomData};
+use std::io::Write;
 
 use serde::{Serialize, ser};
 
@@ -11,15 +11,32 @@ use crate::{
 };
 
 /// Serializer
-pub struct Serializer<W, CFG> {
+pub struct Serializer<W, const WITH_IDENTS: bool> {
     output: SkipWrite<W>,
-    _cfg: PhantomData<CFG>,
+    remaining_depth: usize,
 }
 
-impl<W: Write, CFG: Cfg> Serializer<W, CFG> {
-    /// Creates a new serializer.
-    pub fn new(write: W) -> Self {
-        Self { output: SkipWrite::new(write), _cfg: PhantomData }
+impl<W: Write, const WITH_IDENTS: bool> Serializer<W, WITH_IDENTS> {
+    /// Creates a new serializer using the specified configuration.
+    pub fn new(write: W, cfg: Cfg<WITH_IDENTS>) -> Self {
+        Self { output: SkipWrite::new(write), remaining_depth: cfg.depth_limit() }
+    }
+
+    /// Executes `f` with the nesting depth counter increased by one.
+    ///
+    /// Fails with [`Error::RecursionLimit`] when the configured depth limit
+    /// would be exceeded. This bounds stack usage, since serialization of
+    /// nested data is recursive.
+    pub(crate) fn recurse<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        let Some(remaining) = self.remaining_depth.checked_sub(1) else {
+            return Err(Error::RecursionLimit);
+        };
+
+        self.remaining_depth = remaining;
+        let res = f(self);
+        self.remaining_depth += 1;
+
+        res
     }
 
     /// Get the writer.
@@ -82,19 +99,18 @@ impl<W: Write, CFG: Cfg> Serializer<W, CFG> {
     }
 }
 
-impl<'a, W, CFG> ser::Serializer for &'a mut Serializer<W, CFG>
+impl<'a, W, const WITH_IDENTS: bool> ser::Serializer for &'a mut Serializer<W, WITH_IDENTS>
 where
     W: Write,
-    CFG: Cfg,
 {
     type Ok = ();
     type Error = Error;
 
-    type SerializeSeq = SeqSerializer<'a, W, CFG>;
+    type SerializeSeq = SeqSerializer<'a, W, WITH_IDENTS>;
     type SerializeTuple = Self;
     type SerializeTupleStruct = Self;
     type SerializeTupleVariant = Self;
-    type SerializeMap = MapSerializer<'a, W, CFG>;
+    type SerializeMap = MapSerializer<'a, W, WITH_IDENTS>;
     type SerializeStruct = Self;
     type SerializeStructVariant = Self;
 
@@ -186,7 +202,7 @@ where
         T: ?Sized + Serialize,
     {
         self.serialize_u8(SOME)?;
-        value.serialize(self)
+        self.recurse(|ser| value.serialize(ser))
     }
 
     fn serialize_unit(self) -> Result<()> {
@@ -200,7 +216,7 @@ where
     fn serialize_unit_variant(
         self, _name: &'static str, variant_index: u32, variant: &'static str,
     ) -> Result<()> {
-        if CFG::with_idents() {
+        if WITH_IDENTS {
             self.write_identifier(variant)?;
         } else {
             self.write_u32(variant_index)?;
@@ -212,7 +228,7 @@ where
     where
         T: ?Sized + Serialize,
     {
-        value.serialize(self)
+        self.recurse(|ser| value.serialize(ser))
     }
 
     fn serialize_newtype_variant<T>(
@@ -221,12 +237,12 @@ where
     where
         T: ?Sized + Serialize,
     {
-        if CFG::with_idents() {
+        if WITH_IDENTS {
             self.write_identifier(variant)?;
         } else {
             self.write_u32(variant_index)?;
         }
-        value.serialize(self)?;
+        self.recurse(|ser| value.serialize(ser))?;
 
         Ok(())
     }
@@ -259,7 +275,7 @@ where
     fn serialize_tuple_variant(
         self, _name: &'static str, variant_index: u32, variant: &'static str, _len: usize,
     ) -> Result<Self::SerializeTupleVariant> {
-        if CFG::with_idents() {
+        if WITH_IDENTS {
             self.write_identifier(variant)?;
         } else {
             self.write_u32(variant_index)?;
@@ -288,7 +304,7 @@ where
     fn serialize_struct(self, _name: &'static str, len: usize) -> Result<Self::SerializeStruct> {
         self.write_usize(len)?;
 
-        if !CFG::with_idents() {
+        if !WITH_IDENTS {
             self.output.start_skippable();
         }
 
@@ -298,7 +314,7 @@ where
     fn serialize_struct_variant(
         self, _name: &'static str, variant_index: u32, variant: &'static str, len: usize,
     ) -> Result<Self::SerializeStructVariant> {
-        if CFG::with_idents() {
+        if WITH_IDENTS {
             self.write_identifier(variant)?;
         } else {
             self.write_u32(variant_index)?;
@@ -306,7 +322,7 @@ where
 
         self.write_usize(len)?;
 
-        if !CFG::with_idents() {
+        if !WITH_IDENTS {
             self.output.start_skippable();
         }
 
@@ -314,15 +330,14 @@ where
     }
 }
 
-pub struct SeqSerializer<'a, W, CFG> {
-    serializer: &'a mut Serializer<W, CFG>,
+pub struct SeqSerializer<'a, W, const WITH_IDENTS: bool> {
+    serializer: &'a mut Serializer<W, WITH_IDENTS>,
     len: Option<usize>,
 }
 
-impl<'a, W, CFG> ser::SerializeSeq for SeqSerializer<'a, W, CFG>
+impl<'a, W, const WITH_IDENTS: bool> ser::SerializeSeq for SeqSerializer<'a, W, WITH_IDENTS>
 where
     W: Write,
-    CFG: Cfg,
 {
     type Ok = ();
     type Error = Error;
@@ -332,7 +347,7 @@ where
     where
         T: ?Sized + Serialize,
     {
-        value.serialize(&mut *self.serializer)
+        self.serializer.recurse(|ser| value.serialize(ser))
     }
 
     fn end(self) -> Result<()> {
@@ -344,10 +359,9 @@ where
     }
 }
 
-impl<W, CFG> ser::SerializeTuple for &mut Serializer<W, CFG>
+impl<W, const WITH_IDENTS: bool> ser::SerializeTuple for &mut Serializer<W, WITH_IDENTS>
 where
     W: Write,
-    CFG: Cfg,
 {
     type Ok = ();
     type Error = Error;
@@ -357,7 +371,7 @@ where
     where
         T: ?Sized + Serialize,
     {
-        value.serialize(&mut **self)
+        (**self).recurse(|ser| value.serialize(ser))
     }
 
     fn end(self) -> Result<()> {
@@ -365,10 +379,9 @@ where
     }
 }
 
-impl<W, CFG> ser::SerializeTupleStruct for &mut Serializer<W, CFG>
+impl<W, const WITH_IDENTS: bool> ser::SerializeTupleStruct for &mut Serializer<W, WITH_IDENTS>
 where
     W: Write,
-    CFG: Cfg,
 {
     type Ok = ();
     type Error = Error;
@@ -378,7 +391,7 @@ where
     where
         T: ?Sized + Serialize,
     {
-        value.serialize(&mut **self)
+        (**self).recurse(|ser| value.serialize(ser))
     }
 
     fn end(self) -> Result<()> {
@@ -386,10 +399,9 @@ where
     }
 }
 
-impl<W, CFG> ser::SerializeTupleVariant for &mut Serializer<W, CFG>
+impl<W, const WITH_IDENTS: bool> ser::SerializeTupleVariant for &mut Serializer<W, WITH_IDENTS>
 where
     W: Write,
-    CFG: Cfg,
 {
     type Ok = ();
     type Error = Error;
@@ -399,7 +411,7 @@ where
     where
         T: ?Sized + Serialize,
     {
-        value.serialize(&mut **self)
+        (**self).recurse(|ser| value.serialize(ser))
     }
 
     fn end(self) -> Result<()> {
@@ -407,15 +419,14 @@ where
     }
 }
 
-pub struct MapSerializer<'a, W, CFG> {
-    serializer: &'a mut Serializer<W, CFG>,
+pub struct MapSerializer<'a, W, const WITH_IDENTS: bool> {
+    serializer: &'a mut Serializer<W, WITH_IDENTS>,
     len: Option<usize>,
 }
 
-impl<'a, W, CFG> ser::SerializeMap for MapSerializer<'a, W, CFG>
+impl<'a, W, const WITH_IDENTS: bool> ser::SerializeMap for MapSerializer<'a, W, WITH_IDENTS>
 where
     W: Write,
-    CFG: Cfg,
 {
     type Ok = ();
     type Error = Error;
@@ -425,7 +436,7 @@ where
     where
         T: ?Sized + Serialize,
     {
-        key.serialize(&mut *self.serializer)
+        self.serializer.recurse(|ser| key.serialize(ser))
     }
 
     #[inline(never)]
@@ -433,7 +444,7 @@ where
     where
         T: ?Sized + Serialize,
     {
-        value.serialize(&mut *self.serializer)
+        self.serializer.recurse(|ser| value.serialize(ser))
     }
 
     fn end(self) -> Result<()> {
@@ -445,10 +456,9 @@ where
     }
 }
 
-impl<W, CFG> ser::SerializeStruct for &mut Serializer<W, CFG>
+impl<W, const WITH_IDENTS: bool> ser::SerializeStruct for &mut Serializer<W, WITH_IDENTS>
 where
     W: Write,
-    CFG: Cfg,
 {
     type Ok = ();
     type Error = Error;
@@ -458,14 +468,14 @@ where
     where
         T: ?Sized + Serialize,
     {
-        if CFG::with_idents() {
+        if WITH_IDENTS {
             self.write_identifier(key)?;
             self.output.start_skippable();
         }
 
-        value.serialize(&mut **self)?;
+        (**self).recurse(|ser| value.serialize(ser))?;
 
-        if CFG::with_idents() {
+        if WITH_IDENTS {
             self.output.end_skippable()?;
         }
 
@@ -473,7 +483,7 @@ where
     }
 
     fn end(self) -> Result<()> {
-        if !CFG::with_idents() {
+        if !WITH_IDENTS {
             self.output.end_skippable()?;
         }
 
@@ -481,10 +491,9 @@ where
     }
 }
 
-impl<W, CFG> ser::SerializeStructVariant for &mut Serializer<W, CFG>
+impl<W, const WITH_IDENTS: bool> ser::SerializeStructVariant for &mut Serializer<W, WITH_IDENTS>
 where
     W: Write,
-    CFG: Cfg,
 {
     type Ok = ();
     type Error = Error;
@@ -494,14 +503,14 @@ where
     where
         T: ?Sized + Serialize,
     {
-        if CFG::with_idents() {
+        if WITH_IDENTS {
             self.write_identifier(key)?;
             self.output.start_skippable();
         }
 
-        value.serialize(&mut **self)?;
+        (**self).recurse(|ser| value.serialize(ser))?;
 
-        if CFG::with_idents() {
+        if WITH_IDENTS {
             self.output.end_skippable()?;
         }
 
@@ -509,7 +518,7 @@ where
     }
 
     fn end(self) -> Result<()> {
-        if !CFG::with_idents() {
+        if !WITH_IDENTS {
             self.output.end_skippable()?;
         }
 

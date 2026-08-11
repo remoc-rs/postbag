@@ -1,17 +1,20 @@
 use deserializer::Deserializer;
 use serde::de::DeserializeOwned;
 
-use crate::{cfg::Cfg, error::Result};
+use crate::{
+    cfg::{Cfg, Full, Slim},
+    error::Result,
+};
 
 pub(crate) mod deserializer;
 mod skippable;
 
-/// Deserialize a value of type `T` from a [`std::io::Read`].
+/// Deserialize a value of type `T` from a [`std::io::Read`] using the specified
+/// configuration.
 ///
-/// The `CFG` parameter controls the deserialization format and must match the configuration
-/// used during serialization. It can be either:
-/// - [`Full`](crate::cfg::Full): Expects struct field identifiers and enum variant identifiers as strings
-/// - [`Slim`](crate::cfg::Slim): Expects serialized data without identifiers, using indices for enum variants
+/// The configuration must match the one used during serialization:
+/// [`Full`] expects struct field identifiers and enum variant identifiers,
+/// [`Slim`] expects data without identifiers, using indices for enum variants.
 ///
 /// # Example
 ///
@@ -33,26 +36,68 @@ mod skippable;
 /// };
 ///
 /// let mut buffer = Vec::new();
-/// serialize::<Full, _, _>(&mut buffer, &original).unwrap();
+/// serialize(Full::new(), &mut buffer, &original).unwrap();
 ///
-/// let deserialized: Person = deserialize::<Full, _, _>(buffer.as_slice()).unwrap();
+/// let deserialized: Person = deserialize(Full::new(), buffer.as_slice()).unwrap();
 /// assert_eq!(original, deserialized);
 /// ```
-pub fn deserialize<CFG, R, T>(read: R) -> Result<T>
+///
+/// The configuration also carries the nesting depth limit:
+///
+/// ```rust
+/// # use serde::{Serialize, Deserialize};
+/// # use postbag::{to_vec, deserialize, cfg::Full};
+/// # #[derive(Serialize, Deserialize, Debug, PartialEq)]
+/// # struct Person { name: String, age: u32 }
+/// # let person = Person { name: "Alice".to_string(), age: 30 };
+/// let cfg = Full::new().with_depth_limit(512);
+/// let bytes = to_vec(cfg, &person).unwrap();
+/// let deserialized: Person = deserialize(cfg, bytes.as_slice()).unwrap();
+/// ```
+pub fn deserialize<R, T, const WITH_IDENTS: bool>(cfg: Cfg<WITH_IDENTS>, read: R) -> Result<T>
 where
-    CFG: Cfg,
     R: std::io::Read,
     T: DeserializeOwned,
 {
-    let mut deserializer = Deserializer::<R, CFG>::new(read);
+    let mut deserializer = Deserializer::<R, WITH_IDENTS>::new(read, cfg);
     let t = T::deserialize(&mut deserializer)?;
     deserializer.finalize();
     Ok(t)
 }
 
-/// Deserialize a value using the [`Full`](crate::cfg::Full) configuration.
+/// Deserialize a value from a byte slice using the specified configuration.
 ///
-/// This is a convenience function equivalent to `deserialize::<Full, _, _>(reader)`.
+/// # Example
+///
+/// ```rust
+/// use serde::{Serialize, Deserialize};
+/// use postbag::{to_vec, from_slice, cfg::Slim};
+///
+/// #[derive(Serialize, Deserialize, Debug, PartialEq)]
+/// struct Person {
+///     name: String,
+///     age: u32,
+/// }
+///
+/// let person = Person {
+///     name: "Alice".to_string(),
+///     age: 30,
+/// };
+///
+/// let bytes = to_vec(Slim::new(), &person).unwrap();
+/// let deserialized: Person = from_slice(Slim::new(), &bytes).unwrap();
+/// assert_eq!(person, deserialized);
+/// ```
+pub fn from_slice<T, const WITH_IDENTS: bool>(cfg: Cfg<WITH_IDENTS>, slice: &[u8]) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    deserialize(cfg, slice)
+}
+
+/// Deserialize a value using the [`Full`] configuration.
+///
+/// This is a convenience function equivalent to `deserialize(Full::new(), reader)`.
 /// It expects struct field identifiers and enum variant identifiers as strings.
 ///
 /// # Example
@@ -83,12 +128,12 @@ where
     R: std::io::Read,
     T: DeserializeOwned,
 {
-    deserialize::<crate::cfg::Full, R, T>(reader)
+    deserialize(Full::new(), reader)
 }
 
-/// Deserialize a value using the [`Slim`](crate::cfg::Slim) configuration.
+/// Deserialize a value using the [`Slim`] configuration.
 ///
-/// This is a convenience function equivalent to `deserialize::<Slim, _, _>(reader)`.
+/// This is a convenience function equivalent to `deserialize(Slim::new(), reader)`.
 /// It expects serialized data without identifiers, using indices for enum variants.
 ///
 /// # Example
@@ -119,13 +164,14 @@ where
     R: std::io::Read,
     T: DeserializeOwned,
 {
-    deserialize::<crate::cfg::Slim, R, T>(reader)
+    deserialize(Slim::new(), reader)
 }
 
-/// Deserialize a value from a byte slice using the [`Full`](crate::cfg::Full) configuration.
+/// Deserialize a value from a byte slice using the [`Full`] configuration.
 ///
-/// This is a convenience function that calls `deserialize_full` with the provided byte slice.
-/// It deserializes data that includes struct field identifiers and enum variant identifiers as strings.
+/// This is a convenience function equivalent to `from_slice(Full::new(), slice)`.
+/// It deserializes data that includes struct field identifiers and enum variant
+/// identifiers as strings.
 ///
 /// # Example
 ///
@@ -152,12 +198,12 @@ pub fn from_full_slice<T>(slice: &[u8]) -> Result<T>
 where
     T: DeserializeOwned,
 {
-    deserialize_full(slice)
+    from_slice(Full::new(), slice)
 }
 
-/// Deserialize a value from a byte slice using the [`Slim`](crate::cfg::Slim) configuration.
+/// Deserialize a value from a byte slice using the [`Slim`] configuration.
 ///
-/// This is a convenience function that calls `deserialize_slim` with the provided byte slice.
+/// This is a convenience function equivalent to `from_slice(Slim::new(), slice)`.
 /// It deserializes data without identifiers, using indices for enum variants.
 ///
 /// # Example
@@ -185,5 +231,5 @@ pub fn from_slim_slice<T>(slice: &[u8]) -> Result<T>
 where
     T: DeserializeOwned,
 {
-    deserialize_slim(slice)
+    from_slice(Slim::new(), slice)
 }

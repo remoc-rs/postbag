@@ -8,22 +8,21 @@ use postbag::{
 
 /// Transform from one type to another via serialization followed by deserialization.
 #[track_caller]
-pub fn transform<T, R, CFG>(value: &T) -> R
+pub fn transform<T, R, const WITH_IDENTS: bool>(value: &T, cfg: Cfg<WITH_IDENTS>) -> R
 where
     T: Serialize + DeserializeOwned + Debug + Eq,
     R: DeserializeOwned,
-    CFG: Cfg,
 {
     let mut serialized = Vec::new();
-    serialize::<CFG, _, _>(&mut serialized, &value).expect("serialization failed");
+    serialize(cfg, &mut serialized, &value).expect("serialization failed");
     println!("{serialized:02x?}");
     dbg!(serialized.len());
 
-    let deserialized: T = deserialize::<CFG, _, _>(serialized.as_slice()).expect("deserialization failed");
+    let deserialized: T = deserialize(cfg, serialized.as_slice()).expect("deserialization failed");
 
     assert_eq!(*value, deserialized, "deserialized value does not match original value");
 
-    deserialize::<CFG, _, _>(serialized.as_slice()).expect("deserialization to transformed type failed")
+    deserialize(cfg, serialized.as_slice()).expect("deserialization to transformed type failed")
 }
 
 #[test]
@@ -48,7 +47,7 @@ fn changed_struct_fields() {
 
     let a = A { f1: 1, f2: 2, f3: 3 };
 
-    let b: B = transform::<_, _, Full>(&a);
+    let b: B = transform(&a, Full::new());
 
     assert_eq!(b.f2, a.f2);
     assert_eq!(b.f4, f4_default());
@@ -78,13 +77,13 @@ fn added_struct_fields() {
 
     let a = A { f1: 1, f2: 2, f3: 3 };
 
-    let b: B = transform::<_, _, Full>(&a);
+    let b: B = transform(&a, Full::new());
     assert_eq!(b.f1, a.f1);
     assert_eq!(b.f2, a.f2);
     assert_eq!(b.f3, a.f3);
     assert_eq!(b.f4, f4_default());
 
-    let b: B = transform::<_, _, Slim>(&a);
+    let b: B = transform(&a, Slim::new());
     assert_eq!(b.f1, a.f1);
     assert_eq!(b.f2, a.f2);
     assert_eq!(b.f3, a.f3);
@@ -118,7 +117,7 @@ fn changed_struct_variant_fields() {
     let a_f2 = 2;
     let a = A::V2 { f1: 1, f2: a_f2, f3: 3 };
 
-    let b: B = transform::<_, _, Full>(&a);
+    let b: B = transform(&a, Full::new());
 
     let B::V2 { f2, f4 } = b else { panic!("wrong variant") };
     assert_eq!(f2, a_f2);
@@ -155,14 +154,14 @@ fn added_struct_variant_fields() {
     let a_f3 = 3;
     let a = A::V2 { f1: a_f1, f2: a_f2, f3: a_f3 };
 
-    let b: B = transform::<_, _, Full>(&a);
+    let b: B = transform(&a, Full::new());
     let B::V2 { f1, f2, f3, f4 } = b else { panic!("wrong variant") };
     assert_eq!(f1, a_f1);
     assert_eq!(f2, a_f2);
     assert_eq!(f3, a_f3);
     assert_eq!(f4, f4_default());
 
-    let b: B = transform::<_, _, Slim>(&a);
+    let b: B = transform(&a, Slim::new());
     let B::V2 { f1, f2, f3, f4 } = b else { panic!("wrong variant") };
     assert_eq!(f1, a_f1);
     assert_eq!(f2, a_f2);
@@ -199,12 +198,12 @@ fn removed_struct_fields_nested_struct() {
 
     let xa = XA { a: A { f1: 1, f2: 2, f3: 3 }, x: 99 };
 
-    let xb: XB = transform::<_, _, Full>(&xa);
+    let xb: XB = transform(&xa, Full::new());
     assert_eq!(xb.a.f1, xa.a.f1);
     assert_eq!(xb.a.f2, xa.a.f2);
     assert_eq!(xb.x, xa.x);
 
-    let xb: XB = transform::<_, _, Slim>(&xa);
+    let xb: XB = transform(&xa, Slim::new());
     assert_eq!(xb.a.f1, xa.a.f1);
     assert_eq!(xb.a.f2, xa.a.f2);
     assert_eq!(xb.x, xa.x);
@@ -227,12 +226,12 @@ fn removed_struct_fields_nested_tuple() {
 
     let xa = (A { f1: 1, f2: 2, f3: 3 }, 99);
 
-    let xb: (B, u32) = transform::<_, _, Full>(&xa);
+    let xb: (B, u32) = transform(&xa, Full::new());
     assert_eq!(xb.0.f1, xa.0.f1);
     assert_eq!(xb.0.f2, xa.0.f2);
     assert_eq!(xb.1, xa.1);
 
-    let xb: (B, u32) = transform::<_, _, Slim>(&xa);
+    let xb: (B, u32) = transform(&xa, Slim::new());
     assert_eq!(xb.0.f1, xa.0.f1);
     assert_eq!(xb.0.f2, xa.0.f2);
     assert_eq!(xb.1, xa.1);
@@ -282,21 +281,21 @@ fn added_enum_variants_slim_encoding() {
 
     // Test forward compatibility: Original -> Extended
     let original_v1 = Original::Variant1;
-    let extended_v1: Extended = transform::<_, _, Slim>(&original_v1);
+    let extended_v1: Extended = transform(&original_v1, Slim::new());
     assert_eq!(extended_v1, Extended::Variant1);
 
     let original_v2 = Original::Variant2(42);
-    let extended_v2: Extended = transform::<_, _, Slim>(&original_v2);
+    let extended_v2: Extended = transform(&original_v2, Slim::new());
     assert_eq!(extended_v2, Extended::Variant2(42));
 
     let original_v3 = Original::Variant3 { value: "test".to_string() };
-    let extended_v3: Extended = transform::<_, _, Slim>(&original_v3);
+    let extended_v3: Extended = transform(&original_v3, Slim::new());
     assert_eq!(extended_v3, Extended::Variant3 { value: "test".to_string() });
 
     // Test backward compatibility: Extended -> Original (with #[serde(other)])
     let extended_v4 = Extended::Variant4;
     let mut serialized = Vec::new();
-    serialize::<Slim, _, _>(&mut serialized, &extended_v4).expect("serialization failed");
+    serialize(Slim::new(), &mut serialized, &extended_v4).expect("serialization failed");
 
     // This should deserialize to Unknown variant when using Original enum with #[serde(other)]
     #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -311,37 +310,36 @@ fn added_enum_variants_slim_encoding() {
     }
 
     let deserialized: OriginalWithOther =
-        deserialize::<Slim, _, _>(serialized.as_slice()).expect("deserialization failed");
+        deserialize(Slim::new(), serialized.as_slice()).expect("deserialization failed");
     assert_eq!(deserialized, OriginalWithOther::Unknown);
 
     let extended_v5 = Extended::Variant5(true);
     let mut serialized = Vec::new();
-    serialize::<Slim, _, _>(&mut serialized, &extended_v5).expect("serialization failed");
+    serialize(Slim::new(), &mut serialized, &extended_v5).expect("serialization failed");
     let deserialized: OriginalWithOther =
-        deserialize::<Slim, _, _>(serialized.as_slice()).expect("deserialization failed");
+        deserialize(Slim::new(), serialized.as_slice()).expect("deserialization failed");
     assert_eq!(deserialized, OriginalWithOther::Unknown);
 
     // Test compatibility with even more extended version
     let more_extended_v6 = MoreExtended::Variant6 { x: 10, y: 20 };
     let mut serialized = Vec::new();
-    serialize::<Slim, _, _>(&mut serialized, &more_extended_v6).expect("serialization failed");
+    serialize(Slim::new(), &mut serialized, &more_extended_v6).expect("serialization failed");
 
     // Should deserialize to Unknown in Extended enum
-    let deserialized: Extended =
-        deserialize::<Slim, _, _>(serialized.as_slice()).expect("deserialization failed");
+    let deserialized: Extended = deserialize(Slim::new(), serialized.as_slice()).expect("deserialization failed");
     assert_eq!(deserialized, Extended::Unknown);
 
     // Should also deserialize to Unknown in OriginalWithOther enum
     let deserialized: OriginalWithOther =
-        deserialize::<Slim, _, _>(serialized.as_slice()).expect("deserialization failed");
+        deserialize(Slim::new(), serialized.as_slice()).expect("deserialization failed");
     assert_eq!(deserialized, OriginalWithOther::Unknown);
 
     // Test that existing variants still work across all versions
     let more_extended_v1 = MoreExtended::Variant1;
-    let extended_v1: Extended = transform::<_, _, Slim>(&more_extended_v1);
+    let extended_v1: Extended = transform(&more_extended_v1, Slim::new());
     assert_eq!(extended_v1, Extended::Variant1);
 
-    let original_v1: OriginalWithOther = transform::<_, _, Slim>(&more_extended_v1);
+    let original_v1: OriginalWithOther = transform(&more_extended_v1, Slim::new());
     assert_eq!(original_v1, OriginalWithOther::Variant1);
 }
 
@@ -389,21 +387,21 @@ fn added_enum_variants_full_encoding() {
 
     // Test forward compatibility: Original -> Extended
     let original_v1 = Original::Variant1;
-    let extended_v1: Extended = transform::<_, _, Full>(&original_v1);
+    let extended_v1: Extended = transform(&original_v1, Full::new());
     assert_eq!(extended_v1, Extended::Variant1);
 
     let original_v2 = Original::Variant2(42);
-    let extended_v2: Extended = transform::<_, _, Full>(&original_v2);
+    let extended_v2: Extended = transform(&original_v2, Full::new());
     assert_eq!(extended_v2, Extended::Variant2(42));
 
     let original_v3 = Original::Variant3 { value: "test".to_string() };
-    let extended_v3: Extended = transform::<_, _, Full>(&original_v3);
+    let extended_v3: Extended = transform(&original_v3, Full::new());
     assert_eq!(extended_v3, Extended::Variant3 { value: "test".to_string() });
 
     // Test backward compatibility: Extended -> Original (with #[serde(other)])
     let extended_v4 = Extended::Variant4;
     let mut serialized = Vec::new();
-    serialize::<Full, _, _>(&mut serialized, &extended_v4).expect("serialization failed");
+    serialize(Full::new(), &mut serialized, &extended_v4).expect("serialization failed");
 
     // This should deserialize to Unknown variant when using Original enum with #[serde(other)]
     #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -418,37 +416,36 @@ fn added_enum_variants_full_encoding() {
     }
 
     let deserialized: OriginalWithOther =
-        deserialize::<Full, _, _>(serialized.as_slice()).expect("deserialization failed");
+        deserialize(Full::new(), serialized.as_slice()).expect("deserialization failed");
     assert_eq!(deserialized, OriginalWithOther::Unknown);
 
     let extended_v5 = Extended::Variant5(true);
     let mut serialized = Vec::new();
-    serialize::<Full, _, _>(&mut serialized, &extended_v5).expect("serialization failed");
+    serialize(Full::new(), &mut serialized, &extended_v5).expect("serialization failed");
     let deserialized: OriginalWithOther =
-        deserialize::<Full, _, _>(serialized.as_slice()).expect("deserialization failed");
+        deserialize(Full::new(), serialized.as_slice()).expect("deserialization failed");
     assert_eq!(deserialized, OriginalWithOther::Unknown);
 
     // Test compatibility with even more extended version
     let more_extended_v6 = MoreExtended::Variant6 { x: 10, y: 20 };
     let mut serialized = Vec::new();
-    serialize::<Full, _, _>(&mut serialized, &more_extended_v6).expect("serialization failed");
+    serialize(Full::new(), &mut serialized, &more_extended_v6).expect("serialization failed");
 
     // Should deserialize to Unknown in Extended enum
-    let deserialized: Extended =
-        deserialize::<Full, _, _>(serialized.as_slice()).expect("deserialization failed");
+    let deserialized: Extended = deserialize(Full::new(), serialized.as_slice()).expect("deserialization failed");
     assert_eq!(deserialized, Extended::Unknown);
 
     // Should also deserialize to Unknown in OriginalWithOther enum
     let deserialized: OriginalWithOther =
-        deserialize::<Full, _, _>(serialized.as_slice()).expect("deserialization failed");
+        deserialize(Full::new(), serialized.as_slice()).expect("deserialization failed");
     assert_eq!(deserialized, OriginalWithOther::Unknown);
 
     // Test that existing variants still work across all versions
     let more_extended_v1 = MoreExtended::Variant1;
-    let extended_v1: Extended = transform::<_, _, Full>(&more_extended_v1);
+    let extended_v1: Extended = transform(&more_extended_v1, Full::new());
     assert_eq!(extended_v1, Extended::Variant1);
 
-    let original_v1: OriginalWithOther = transform::<_, _, Full>(&more_extended_v1);
+    let original_v1: OriginalWithOther = transform(&more_extended_v1, Full::new());
     assert_eq!(original_v1, OriginalWithOther::Variant1);
 }
 
@@ -484,18 +481,18 @@ fn reordered_enum_variants_with_numerical_ids_full_encoding() {
         MyLongVariantName(u32),
     }
 
-    let unit: Reordered = transform::<_, _, Full>(&Original::AnotherLongVariantName);
+    let unit: Reordered = transform(&Original::AnotherLongVariantName, Full::new());
     assert_eq!(unit, Reordered::AnotherLongVariantName);
 
-    let newtype: Reordered = transform::<_, _, Full>(&Original::MyLongVariantName(42));
+    let newtype: Reordered = transform(&Original::MyLongVariantName(42), Full::new());
     assert_eq!(newtype, Reordered::MyLongVariantName(42));
 
-    let structed: Reordered = transform::<_, _, Full>(&Original::VariantWithFields { value: 9 });
+    let structed: Reordered = transform(&Original::VariantWithFields { value: 9 }, Full::new());
     assert_eq!(structed, Reordered::VariantWithFields { value: 9 });
 
     // A numerically identified variant occupies a single byte.
     let mut serialized = Vec::new();
-    serialize::<Full, _, _>(&mut serialized, &Original::AnotherLongVariantName).unwrap();
+    serialize(Full::new(), &mut serialized, &Original::AnotherLongVariantName).unwrap();
     assert_eq!(serialized.len(), 1);
 }
 
@@ -572,7 +569,7 @@ fn account_credentials_full_with_urls() {
         }),
     };
 
-    let _: AccountCredentials = transform::<_, _, Full>(&test_credentials);
+    let _: AccountCredentials = transform(&test_credentials, Full::new());
 }
 
 #[test]
@@ -591,7 +588,7 @@ fn account_credentials_slim_with_urls() {
         }),
     };
 
-    let _: AccountCredentials = transform::<_, _, Slim>(&test_credentials);
+    let _: AccountCredentials = transform(&test_credentials, Slim::new());
 }
 
 #[test]
@@ -603,7 +600,7 @@ fn account_credentials_full_without_urls() {
         urls: None, // No URLs
     };
 
-    let _: AccountCredentials = transform::<_, _, Full>(&test_credentials);
+    let _: AccountCredentials = transform(&test_credentials, Full::new());
 }
 
 #[test]
@@ -615,7 +612,7 @@ fn account_credentials_slim_without_urls() {
         urls: None, // No URLs - this will cause skip_serializing_if to omit the field
     };
 
-    let _: AccountCredentials = transform::<_, _, Slim>(&test_credentials);
+    let _: AccountCredentials = transform(&test_credentials, Slim::new());
 }
 
 // =============================================================================
@@ -648,7 +645,7 @@ fn added_struct_field_in_middle() {
     let a = A { f1: 1, f2: 2, f3: 3 };
 
     // Full mode: fields matched by name, so inserting in the middle works.
-    let b: B = transform::<_, _, Full>(&a);
+    let b: B = transform(&a, Full::new());
     assert_eq!(b.f1, a.f1);
     assert_eq!(b.f_mid, mid_default());
     assert_eq!(b.f2, a.f2);
@@ -674,7 +671,7 @@ fn removed_struct_field_from_middle() {
     let a = A { f1: 1, f2: 2, f3: 3 };
 
     // Full mode: fields matched by name, so removal from the middle works.
-    let b: B = transform::<_, _, Full>(&a);
+    let b: B = transform(&a, Full::new());
     assert_eq!(b.f1, a.f1);
     assert_eq!(b.f3, a.f3);
 }
@@ -705,7 +702,7 @@ fn added_and_removed_struct_fields_in_middle() {
 
     let a = A { f1: 1, f2: 2, f3: 3, f4: 4 };
 
-    let b: B = transform::<_, _, Full>(&a);
+    let b: B = transform(&a, Full::new());
     assert_eq!(b.f1, a.f1);
     assert_eq!(b.f_new, new_default());
     assert_eq!(b.f4, a.f4);
@@ -738,7 +735,7 @@ fn added_struct_variant_field_in_middle() {
 
     let a = A::V2 { f1: 1, f2: 2, f3: 3 };
 
-    let b: B = transform::<_, _, Full>(&a);
+    let b: B = transform(&a, Full::new());
     let B::V2 { f1, f_mid, f2, f3 } = b else { panic!("wrong variant") };
     assert_eq!(f1, 1);
     assert_eq!(f_mid, mid_default2());
@@ -762,7 +759,7 @@ fn removed_struct_variant_field_from_middle() {
 
     let a = A::V2 { f1: 1, f2: 2, f3: 3 };
 
-    let b: B = transform::<_, _, Full>(&a);
+    let b: B = transform(&a, Full::new());
     let B::V2 { f1, f3 } = b else { panic!("wrong variant") };
     assert_eq!(f1, 1);
     assert_eq!(f3, 3);

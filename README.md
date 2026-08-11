@@ -129,6 +129,34 @@ This flag is intended for development use only. Production builds should use the
 
 **Limitation**: Forward/backward compatibility for adding or removing struct fields in the middle (i.e. not at the end) is not supported in fast compile mode. Adding or removing fields at the end of structs continues to work.
 
+## Nesting Depth Limit
+
+Serialization and deserialization of nested data is recursive, so deeply nested
+data consumes stack space. To prevent untrusted input from aborting the process
+by overflowing the stack, the nesting depth is limited to `cfg::DEFAULT_DEPTH_LIMIT`
+(128) and exceeding it fails with `Error::RecursionLimit`.
+
+This only becomes relevant for recursive types, since the nesting depth of
+non-recursive types is bounded by the type itself. Unknown fields are skipped
+by length, thus unknown data cannot cause recursion.
+
+The limit is part of the configuration:
+
+```rust
+# use serde::{Serialize, Deserialize};
+# #[derive(Serialize, Deserialize)]
+# struct MyType { value: u32 }
+# let my_value = MyType { value: 1 };
+use postbag::{cfg::Full, to_vec, from_slice};
+
+let cfg = Full::new().with_depth_limit(1024);
+let bytes = to_vec(cfg, &my_value).unwrap();
+let value: MyType = from_slice(cfg, &bytes).unwrap();
+```
+
+Raise it for legitimately deeply nested data, or lower it when deserializing
+untrusted input on threads with a small stack.
+
 ## Origins
 
 Postbag started as a fork of [postcard](https://github.com/jamesmunns/postcard) with the intent to add forward and backward compatibility to the serialized data format. While postcard provides excellent performance and compact encoding, postbag extends this foundation to support schema evolution and data format compatibility across different versions of your applications.

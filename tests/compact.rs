@@ -42,33 +42,32 @@ where
 /// If `check_size` is set and serialization is performed with identifiers, the
 /// compacted representation must not be larger than the plain representation.
 #[track_caller]
-fn compact_loopback_with_cfg<T, CFG>(value: &T, check_size: bool)
+fn compact_loopback_with_cfg<T, const WITH_IDENTS: bool>(value: &T, cfg: Cfg<WITH_IDENTS>, check_size: bool)
 where
     T: Checkable,
     T::Compacted: Serialize + DeserializeOwned,
-    CFG: Cfg,
 {
     let mut plain = Vec::new();
-    let plain_len = match serialize::<CFG, _, _>(&mut plain, value) {
+    let plain_len = match serialize(cfg, &mut plain, value) {
         Ok(()) => Some(plain.len()),
         Err(_) => None,
     };
 
     let mut compact = Vec::new();
-    serialize::<CFG, _, _>(&mut compact, &Compact(value.clone())).expect("compact serialization failed");
+    serialize(cfg, &mut compact, &Compact(value.clone())).expect("compact serialization failed");
 
     println!("{value:?}: plain {plain_len:?} bytes, compact {} bytes", compact.len());
-    if check_size && CFG::with_idents() {
-        if let Some(plain_len) = plain_len {
-            assert!(
-                compact.len() <= plain_len,
-                "compacted representation of {value:?} is larger than plain representation"
-            );
-        }
+    if let Some(plain_len) = plain_len
+        && check_size
+        && cfg.with_idents()
+    {
+        assert!(
+            compact.len() <= plain_len,
+            "compacted representation of {value:?} is larger than plain representation"
+        );
     }
 
-    let deserialized: Compact<T> =
-        deserialize::<CFG, _, _>(compact.as_slice()).expect("compact deserialization failed");
+    let deserialized: Compact<T> = deserialize(cfg, compact.as_slice()).expect("compact deserialization failed");
     assert_eq!(deserialized.0, *value, "deserialized value does not match original value");
 }
 
@@ -79,8 +78,8 @@ where
     T: Checkable,
     T::Compacted: Serialize + DeserializeOwned,
 {
-    compact_loopback_with_cfg::<_, Full>(&value, true);
-    compact_loopback_with_cfg::<_, Slim>(&value, true);
+    compact_loopback_with_cfg(&value, Full::new(), true);
+    compact_loopback_with_cfg(&value, Slim::new(), true);
 }
 
 /// Checks the compacted representation with all configurations, without
@@ -91,30 +90,28 @@ where
     T: Checkable,
     T::Compacted: Serialize + DeserializeOwned,
 {
-    compact_loopback_with_cfg::<_, Full>(&value, false);
-    compact_loopback_with_cfg::<_, Slim>(&value, false);
+    compact_loopback_with_cfg(&value, Full::new(), false);
+    compact_loopback_with_cfg(&value, Slim::new(), false);
 }
 
 /// Serializes the value using its compacted representation.
-fn to_compact_vec<T, CFG>(value: &T) -> Vec<u8>
+fn to_compact_vec<T, const WITH_IDENTS: bool>(value: &T, cfg: Cfg<WITH_IDENTS>) -> Vec<u8>
 where
     T: Compactable + Clone,
     T::Compacted: Serialize,
-    CFG: Cfg,
 {
     let mut compact = Vec::new();
-    serialize::<CFG, _, _>(&mut compact, &Compact(value.clone())).expect("compact serialization failed");
+    serialize(cfg, &mut compact, &Compact(value.clone())).expect("compact serialization failed");
     compact
 }
 
 /// Deserializes the value from its compacted representation.
-fn from_compact_slice<T, CFG>(data: &[u8]) -> postbag::Result<T>
+fn from_compact_slice<T, const WITH_IDENTS: bool>(data: &[u8], cfg: Cfg<WITH_IDENTS>) -> postbag::Result<T>
 where
     T: Compactable + Clone,
     T::Compacted: DeserializeOwned,
-    CFG: Cfg,
 {
-    deserialize::<CFG, _, Compact<T>>(data).map(|value| value.0)
+    deserialize::<_, Compact<T>, WITH_IDENTS>(cfg, data).map(|value| value.0)
 }
 
 #[test]
@@ -135,12 +132,13 @@ fn durations() {
 
 #[test]
 fn duration_rejects_invalid() {
-    let data = to_compact_vec::<_, Full>(&Duration::MAX);
-    from_compact_slice::<Duration, Full>(&data).expect("Duration::MAX must be representable");
+    let data = to_compact_vec(&Duration::MAX, Full::new());
+    from_compact_slice::<Duration, _>(&data, Full::new()).expect("Duration::MAX must be representable");
 
     let mut invalid_nanos = Vec::new();
-    serialize::<Full, _, _>(&mut invalid_nanos, &(0u64, 1_000_000_000u32)).unwrap();
-    from_compact_slice::<Duration, Full>(&invalid_nanos).expect_err("invalid nanoseconds must be rejected");
+    serialize(Full::new(), &mut invalid_nanos, &(0u64, 1_000_000_000u32)).unwrap();
+    from_compact_slice::<Duration, _>(&invalid_nanos, Full::new())
+        .expect_err("invalid nanoseconds must be rejected");
 }
 
 #[test]
@@ -161,7 +159,7 @@ fn system_times_before_unix_epoch() {
     ] {
         // serde is unable to represent points in time before the unix epoch.
         let mut plain = Vec::new();
-        serialize::<Full, _, _>(&mut plain, &before_epoch).expect_err("serde must reject pre-epoch times");
+        serialize(Full::new(), &mut plain, &before_epoch).expect_err("serde must reject pre-epoch times");
 
         compact_loopback(before_epoch);
     }
@@ -170,16 +168,17 @@ fn system_times_before_unix_epoch() {
 #[test]
 fn system_time_rejects_invalid() {
     let mut invalid_nanos = Vec::new();
-    serialize::<Full, _, _>(&mut invalid_nanos, &(0i64, 1_000_000_000u32)).unwrap();
-    from_compact_slice::<SystemTime, Full>(&invalid_nanos).expect_err("invalid nanoseconds must be rejected");
+    serialize(Full::new(), &mut invalid_nanos, &(0i64, 1_000_000_000u32)).unwrap();
+    from_compact_slice::<SystemTime, _>(&invalid_nanos, Full::new())
+        .expect_err("invalid nanoseconds must be rejected");
 
     // Whether extreme values are representable is platform-dependent, but they
     // must never cause a panic.
     for secs in [i64::MIN, i64::MAX] {
         let mut extreme = Vec::new();
-        serialize::<Full, _, _>(&mut extreme, &(secs, 999_999_999u32)).unwrap();
-        if let Ok(time) = from_compact_slice::<SystemTime, Full>(&extreme) {
-            assert_eq!(to_compact_vec::<_, Full>(&time), extreme);
+        serialize(Full::new(), &mut extreme, &(secs, 999_999_999u32)).unwrap();
+        if let Ok(time) = from_compact_slice::<SystemTime, _>(&extreme, Full::new()) {
+            assert_eq!(to_compact_vec(&time, Full::new()), extreme);
         }
     }
 }
@@ -225,13 +224,13 @@ fn socket_addr_v6_preserves_flowinfo_and_scope_id() {
 
     // serde discards the flow information and the scope id.
     let mut plain = Vec::new();
-    serialize::<Full, _, _>(&mut plain, &addr).unwrap();
-    let plain_deserialized: SocketAddrV6 = deserialize::<Full, _, _>(plain.as_slice()).unwrap();
+    serialize(Full::new(), &mut plain, &addr).unwrap();
+    let plain_deserialized: SocketAddrV6 = deserialize(Full::new(), plain.as_slice()).unwrap();
     assert_eq!(plain_deserialized.flowinfo(), 0);
     assert_eq!(plain_deserialized.scope_id(), 0);
 
-    let data = to_compact_vec::<_, Full>(&addr);
-    let deserialized: SocketAddrV6 = from_compact_slice::<_, Full>(&data).unwrap();
+    let data = to_compact_vec(&addr, Full::new());
+    let deserialized: SocketAddrV6 = from_compact_slice::<_, _>(&data, Full::new()).unwrap();
     assert_eq!(deserialized, addr);
     assert_eq!(deserialized.flowinfo(), 7);
     assert_eq!(deserialized.scope_id(), 42);

@@ -1,0 +1,199 @@
+//! Tests for the nesting depth limit.
+
+use serde::{Deserialize, Serialize};
+
+use postbag::{
+    Error,
+    cfg::{DEFAULT_DEPTH_LIMIT, Full, Slim},
+    from_full_slice, from_slice, from_slim_slice, to_full_vec, to_slim_vec, to_vec,
+};
+
+/// Recursive type nested via an enum variant.
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+enum Tree {
+    Leaf,
+    Node(Box<Tree>),
+}
+
+impl Tree {
+    fn nested(depth: usize) -> Self {
+        let mut tree = Tree::Leaf;
+        for _ in 0..depth {
+            tree = Tree::Node(Box::new(tree));
+        }
+        tree
+    }
+}
+
+/// Recursive type nested via `Option`.
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+struct List {
+    next: Option<Box<List>>,
+}
+
+impl List {
+    fn nested(depth: usize) -> Self {
+        let mut list = List { next: None };
+        for _ in 0..depth {
+            list = List { next: Some(Box::new(list)) };
+        }
+        list
+    }
+}
+
+/// Hostile input: a long run of `Node` variant tags in slim encoding.
+fn hostile_slim(depth: usize) -> Vec<u8> {
+    let mut bytes = vec![1u8; depth];
+    bytes.push(0);
+    bytes
+}
+
+/// Hostile input: a long run of `Node` variant tags in full encoding.
+fn hostile_full(depth: usize) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for _ in 0..depth {
+        bytes.push(4);
+        bytes.extend_from_slice(b"Node");
+    }
+    bytes.push(4);
+    bytes.extend_from_slice(b"Leaf");
+    bytes
+}
+
+#[test]
+fn default_depth_limit_is_reachable_from_config() {
+    assert_eq!(Full::DEFAULT_DEPTH_LIMIT, DEFAULT_DEPTH_LIMIT);
+    assert_eq!(Slim::DEFAULT_DEPTH_LIMIT, DEFAULT_DEPTH_LIMIT);
+    assert_eq!(Full::new().depth_limit(), DEFAULT_DEPTH_LIMIT);
+    assert_eq!(Slim::new().depth_limit(), DEFAULT_DEPTH_LIMIT);
+}
+
+#[test]
+fn deeply_nested_input_is_rejected_slim() {
+    let res: Result<Tree, _> = from_slim_slice(&hostile_slim(1_000_000));
+    assert!(matches!(res, Err(Error::RecursionLimit)), "expected recursion limit error, got {res:?}");
+}
+
+#[test]
+fn deeply_nested_input_is_rejected_full() {
+    let res: Result<Tree, _> = from_full_slice(&hostile_full(1_000_000));
+    assert!(matches!(res, Err(Error::RecursionLimit)), "expected recursion limit error, got {res:?}");
+}
+
+#[test]
+fn nesting_within_limit_is_accepted() {
+    // Each level of `Tree` costs one enum level plus one newtype variant level,
+    // so stay well within the default limit.
+    let tree = Tree::nested(DEFAULT_DEPTH_LIMIT / 4);
+
+    let bytes = to_slim_vec(&tree).unwrap();
+    let restored: Tree = from_slim_slice(&bytes).unwrap();
+    assert_eq!(tree, restored);
+
+    let bytes = to_full_vec(&tree).unwrap();
+    let restored: Tree = from_full_slice(&bytes).unwrap();
+    assert_eq!(tree, restored);
+}
+
+#[test]
+fn option_nesting_is_limited() {
+    let list = List::nested(1000);
+
+    let bytes = to_vec(Slim::new().with_depth_limit(usize::MAX), &list).unwrap();
+    let res: Result<List, _> = from_slim_slice(&bytes);
+    assert!(matches!(res, Err(Error::RecursionLimit)), "expected recursion limit error, got {res:?}");
+
+    let bytes = to_vec(Full::new().with_depth_limit(usize::MAX), &list).unwrap();
+    let res: Result<List, _> = from_full_slice(&bytes);
+    assert!(matches!(res, Err(Error::RecursionLimit)), "expected recursion limit error, got {res:?}");
+}
+
+#[test]
+fn seq_nesting_is_limited() {
+    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    struct Nested(Vec<Nested>);
+
+    let mut nested = Nested(Vec::new());
+    for _ in 0..1000 {
+        nested = Nested(vec![nested]);
+    }
+
+    let bytes = to_vec(Slim::new().with_depth_limit(usize::MAX), &nested).unwrap();
+    let res: Result<Nested, _> = from_slim_slice(&bytes);
+    assert!(matches!(res, Err(Error::RecursionLimit)), "expected recursion limit error, got {res:?}");
+}
+
+#[test]
+fn raised_limit_allows_deeper_nesting() {
+    let depth = DEFAULT_DEPTH_LIMIT * 4;
+    let tree = Tree::nested(depth);
+    let bytes = to_vec(Slim::new().with_depth_limit(usize::MAX), &tree).unwrap();
+
+    // Rejected with the default limit.
+    let res: Result<Tree, _> = from_slim_slice(&bytes);
+    assert!(matches!(res, Err(Error::RecursionLimit)));
+
+    // Accepted with a raised limit.
+    let restored: Tree = from_slice(Slim::new().with_depth_limit(depth * 4), &bytes).unwrap();
+    assert_eq!(tree, restored);
+}
+
+#[test]
+fn lowered_limit_is_enforced() {
+    let tree = Tree::nested(8);
+    let bytes = to_full_vec(&tree).unwrap();
+
+    let res: Result<Tree, _> = from_slice(Full::new().with_depth_limit(4), &bytes);
+    assert!(matches!(res, Err(Error::RecursionLimit)), "expected recursion limit error, got {res:?}");
+}
+
+#[test]
+fn limit_is_not_consumed_by_sibling_fields() {
+    // Depth is about nesting, not about the total number of values: a struct
+    // with many non-nested fields must not exhaust the budget.
+    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    struct Wide {
+        a: Vec<u32>,
+        b: Vec<u32>,
+        c: Vec<u32>,
+        d: Vec<u32>,
+    }
+
+    let wide = Wide { a: vec![1; 100], b: vec![2; 100], c: vec![3; 100], d: vec![4; 100] };
+
+    let bytes = to_full_vec(&wide).unwrap();
+    let restored: Wide = from_slice(Full::new().with_depth_limit(8), &bytes).unwrap();
+    assert_eq!(wide, restored);
+
+    let bytes = to_slim_vec(&wide).unwrap();
+    let restored: Wide = from_slice(Slim::new().with_depth_limit(8), &bytes).unwrap();
+    assert_eq!(wide, restored);
+}
+
+#[test]
+fn serialization_and_deserialization_limits_agree() {
+    // A value that can be serialized with a given limit must also be
+    // deserializable with the same limit, otherwise round-tripping a value
+    // would break at the limit boundary.
+    for limit in [2, 3, 4, 8, 16, 32, 128] {
+        for depth in 0..limit * 2 {
+            let tree = Tree::nested(depth);
+
+            let slim = Slim::new().with_depth_limit(limit);
+            if let Ok(bytes) = to_vec(slim, &tree) {
+                let restored: Tree = from_slice(slim, &bytes).unwrap_or_else(|err| {
+                    panic!("slim: depth {depth} serialized with limit {limit} but failed to deserialize: {err}")
+                });
+                assert_eq!(tree, restored);
+            }
+
+            let full = Full::new().with_depth_limit(limit);
+            if let Ok(bytes) = to_vec(full, &tree) {
+                let restored: Tree = from_slice(full, &bytes).unwrap_or_else(|err| {
+                    panic!("full: depth {depth} serialized with limit {limit} but failed to deserialize: {err}")
+                });
+                assert_eq!(tree, restored);
+            }
+        }
+    }
+}

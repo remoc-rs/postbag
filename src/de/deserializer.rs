@@ -14,19 +14,24 @@ use crate::{
 };
 
 /// Deserializer.
-pub struct Deserializer<'de, R, CFG> {
+pub struct Deserializer<'de, R, const WITH_IDENTS: bool> {
     input: SkipRead<R>,
+    remaining_depth: usize,
     _de: PhantomData<&'de ()>,
-    _cfg: PhantomData<CFG>,
 }
 
-impl<'de, R, CFG: Cfg> Deserializer<'de, R, CFG>
+impl<'de, R, const WITH_IDENTS: bool> Deserializer<'de, R, WITH_IDENTS>
 where
     R: Read,
 {
-    /// Obtain a Deserializer from a reader.
-    pub fn new(read: R) -> Self {
-        Deserializer { input: SkipRead::new(read), _de: PhantomData, _cfg: PhantomData }
+    /// Obtain a Deserializer from a reader, using the specified configuration.
+    pub fn new(read: R, cfg: Cfg<WITH_IDENTS>) -> Self {
+        Self::with_depth_limit(read, cfg.depth_limit())
+    }
+
+    /// Obtain a Deserializer from a reader, using the specified nesting depth limit.
+    fn with_depth_limit(read: R, depth_limit: usize) -> Self {
+        Deserializer { input: SkipRead::new(read), remaining_depth: depth_limit, _de: PhantomData }
     }
 
     /// Returns the reader.
@@ -35,7 +40,25 @@ where
     }
 }
 
-impl<'de, R: Read, CFG: Cfg> Deserializer<'de, R, CFG> {
+impl<'de, R: Read, const WITH_IDENTS: bool> Deserializer<'de, R, WITH_IDENTS> {
+    /// Executes `f` with the nesting depth counter increased by one.
+    ///
+    /// Fails with [`Error::RecursionLimit`] when the configured depth limit
+    /// would be exceeded. This bounds stack usage caused by deeply nested
+    /// (in particular recursive) types, which would otherwise allow untrusted
+    /// input to abort the process by overflowing the stack.
+    fn recurse<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        let Some(remaining) = self.remaining_depth.checked_sub(1) else {
+            return Err(Error::RecursionLimit);
+        };
+
+        self.remaining_depth = remaining;
+        let res = f(self);
+        self.remaining_depth += 1;
+
+        res
+    }
+
     fn read_varint_usize(&mut self) -> Result<usize> {
         let value = self.read_varint_u64()?;
         usize::try_from(value).map_err(|_| Error::UsizeOverflow)
@@ -132,12 +155,14 @@ impl<'de, R: Read, CFG: Cfg> Deserializer<'de, R, CFG> {
     }
 }
 
-struct SeqAccess<'a, 'b, R, CFG> {
-    deserializer: &'a mut Deserializer<'b, R, CFG>,
+struct SeqAccess<'a, 'b, R, const WITH_IDENTS: bool> {
+    deserializer: &'a mut Deserializer<'b, R, WITH_IDENTS>,
     len: Option<usize>,
 }
 
-impl<'a, 'b: 'a, R: Read, CFG: Cfg> serde::de::SeqAccess<'b> for SeqAccess<'a, 'b, R, CFG> {
+impl<'a, 'b: 'a, R: Read, const WITH_IDENTS: bool> serde::de::SeqAccess<'b>
+    for SeqAccess<'a, 'b, R, WITH_IDENTS>
+{
     type Error = Error;
 
     #[inline(never)]
@@ -162,17 +187,19 @@ impl<'a, 'b: 'a, R: Read, CFG: Cfg> serde::de::SeqAccess<'b> for SeqAccess<'a, '
     }
 }
 
-struct StructSeqAccess<'a, 'b, R, CFG> {
-    deserializer: &'a mut Deserializer<'b, R, CFG>,
+struct StructSeqAccess<'a, 'b, R, const WITH_IDENTS: bool> {
+    deserializer: &'a mut Deserializer<'b, R, WITH_IDENTS>,
     len: usize,
 }
 
-impl<'a, 'b: 'a, R: Read, CFG: Cfg> serde::de::SeqAccess<'b> for StructSeqAccess<'a, 'b, R, CFG> {
+impl<'a, 'b: 'a, R: Read, const WITH_IDENTS: bool> serde::de::SeqAccess<'b>
+    for StructSeqAccess<'a, 'b, R, WITH_IDENTS>
+{
     type Error = Error;
 
     #[inline(never)]
     fn next_element_seed<V: DeserializeSeed<'b>>(&mut self, seed: V) -> Result<Option<V::Value>> {
-        assert!(!CFG::with_idents());
+        assert!(!WITH_IDENTS);
 
         if self.len > 0 {
             self.len -= 1;
@@ -192,12 +219,14 @@ impl<'a, 'b: 'a, R: Read, CFG: Cfg> serde::de::SeqAccess<'b> for StructSeqAccess
 ///
 /// Reads field identifiers and values directly from the wire without
 /// buffering, using skippable blocks for forward compatibility.
-struct StructFieldAccess<'a, 'b, R, CFG> {
-    deserializer: &'a mut Deserializer<'b, R, CFG>,
+struct StructFieldAccess<'a, 'b, R, const WITH_IDENTS: bool> {
+    deserializer: &'a mut Deserializer<'b, R, WITH_IDENTS>,
     len: usize,
 }
 
-impl<'a, 'b: 'a, R: Read, CFG: Cfg> serde::de::MapAccess<'b> for StructFieldAccess<'a, 'b, R, CFG> {
+impl<'a, 'b: 'a, R: Read, const WITH_IDENTS: bool> serde::de::MapAccess<'b>
+    for StructFieldAccess<'a, 'b, R, WITH_IDENTS>
+{
     type Error = Error;
 
     #[inline(never)]
@@ -213,7 +242,7 @@ impl<'a, 'b: 'a, R: Read, CFG: Cfg> serde::de::MapAccess<'b> for StructFieldAcce
 
     #[inline(never)]
     fn next_value_seed<V: DeserializeSeed<'b>>(&mut self, seed: V) -> Result<V::Value> {
-        assert!(CFG::with_idents());
+        assert!(WITH_IDENTS);
 
         self.deserializer.input.start_skippable();
         let value = DeserializeSeed::deserialize(seed, &mut *self.deserializer)?;
@@ -234,13 +263,14 @@ impl<'a, 'b: 'a, R: Read, CFG: Cfg> serde::de::MapAccess<'b> for StructFieldAcce
 /// monomorphized code at the cost of buffering all field data in memory.
 ///
 /// Activate with `RUSTFLAGS="--cfg postbag_fast_compile"`.
-struct BufferedFieldSeqAccess<'de, CFG> {
+struct BufferedFieldSeqAccess<'de, const WITH_IDENTS: bool> {
     field_data: Vec<Option<Vec<u8>>>,
     index: usize,
-    _phantom: PhantomData<(&'de (), CFG)>,
+    remaining_depth: usize,
+    _phantom: PhantomData<&'de ()>,
 }
 
-impl<'de, CFG: Cfg> BufferedFieldSeqAccess<'de, CFG> {
+impl<'de, const WITH_IDENTS: bool> BufferedFieldSeqAccess<'de, WITH_IDENTS> {
     /// Reads all wire fields from the deserializer and reorders them to
     /// match the expected field declaration order. Unknown fields are
     /// silently dropped (forward compatibility).
@@ -250,7 +280,7 @@ impl<'de, CFG: Cfg> BufferedFieldSeqAccess<'de, CFG> {
     /// code duplication across the many `deserialize_struct` instantiations.
     #[inline(never)]
     fn new<R: Read>(
-        deser: &mut Deserializer<'_, R, CFG>, fields: &'static [&'static str], len: usize,
+        deser: &mut Deserializer<'_, R, WITH_IDENTS>, fields: &'static [&'static str], len: usize,
     ) -> Result<Self> {
         // Build index: field name -> position in expected order.
         let field_index: HashMap<&'static str, usize> =
@@ -267,11 +297,11 @@ impl<'de, CFG: Cfg> BufferedFieldSeqAccess<'de, CFG> {
             // Unknown fields (forward compat) are silently dropped.
         }
 
-        Ok(Self { field_data, index: 0, _phantom: PhantomData })
+        Ok(Self { field_data, index: 0, remaining_depth: deser.remaining_depth, _phantom: PhantomData })
     }
 }
 
-impl<'de, CFG: Cfg> serde::de::SeqAccess<'de> for BufferedFieldSeqAccess<'de, CFG> {
+impl<'de, const WITH_IDENTS: bool> serde::de::SeqAccess<'de> for BufferedFieldSeqAccess<'de, WITH_IDENTS> {
     type Error = Error;
 
     #[inline(never)]
@@ -287,7 +317,11 @@ impl<'de, CFG: Cfg> serde::de::SeqAccess<'de> for BufferedFieldSeqAccess<'de, CF
             self.index += 1;
 
             if let Some(raw) = self.field_data[idx].take() {
-                let mut deser = Deserializer::<&[u8], CFG>::new(raw.as_slice());
+                // The remaining depth budget must be carried over into the
+                // sub-deserializer, otherwise nested structs would each start
+                // with a fresh budget and the limit could not be enforced.
+                let mut deser =
+                    Deserializer::<&[u8], WITH_IDENTS>::with_depth_limit(raw.as_slice(), self.remaining_depth);
                 let value = DeserializeSeed::deserialize(seed, &mut deser)?;
                 return Ok(Some(value));
             }
@@ -302,12 +336,14 @@ impl<'de, CFG: Cfg> serde::de::SeqAccess<'de> for BufferedFieldSeqAccess<'de, CF
     }
 }
 
-struct MapAccess<'a, 'b, R, CFG> {
-    deserializer: &'a mut Deserializer<'b, R, CFG>,
+struct MapAccess<'a, 'b, R, const WITH_IDENTS: bool> {
+    deserializer: &'a mut Deserializer<'b, R, WITH_IDENTS>,
     len: Option<usize>,
 }
 
-impl<'a, 'b: 'a, R: Read, CFG: Cfg> serde::de::MapAccess<'b> for MapAccess<'a, 'b, R, CFG> {
+impl<'a, 'b: 'a, R: Read, const WITH_IDENTS: bool> serde::de::MapAccess<'b>
+    for MapAccess<'a, 'b, R, WITH_IDENTS>
+{
     type Error = Error;
 
     #[inline(never)]
@@ -337,7 +373,7 @@ impl<'a, 'b: 'a, R: Read, CFG: Cfg> serde::de::MapAccess<'b> for MapAccess<'a, '
     }
 }
 
-impl<'de, R: Read, CFG: Cfg> de::Deserializer<'de> for &mut Deserializer<'de, R, CFG> {
+impl<'de, R: Read, const WITH_IDENTS: bool> de::Deserializer<'de> for &mut Deserializer<'de, R, WITH_IDENTS> {
     type Error = Error;
 
     fn is_human_readable(&self) -> bool {
@@ -468,7 +504,7 @@ impl<'de, R: Read, CFG: Cfg> de::Deserializer<'de> for &mut Deserializer<'de, R,
         let bytes = self.input.read(sz)?;
 
         let character =
-            std::str::from_utf8(&bytes).map_err(|_| Error::BadChar)?.chars().next().ok_or(Error::BadChar)?;
+            str::from_utf8(&bytes).map_err(|_| Error::BadChar)?.chars().next().ok_or(Error::BadChar)?;
         visitor.visit_char(character)
     }
 
@@ -512,7 +548,7 @@ impl<'de, R: Read, CFG: Cfg> de::Deserializer<'de> for &mut Deserializer<'de, R,
     {
         match self.input.read_u8()? {
             NONE => visitor.visit_none(),
-            SOME => visitor.visit_some(self),
+            SOME => self.recurse(|de| visitor.visit_some(de)),
             _ => Err(Error::BadOption),
         }
     }
@@ -535,7 +571,7 @@ impl<'de, R: Read, CFG: Cfg> de::Deserializer<'de> for &mut Deserializer<'de, R,
     where
         V: Visitor<'de>,
     {
-        visitor.visit_newtype_struct(self)
+        self.recurse(|de| visitor.visit_newtype_struct(de))
     }
 
     fn deserialize_seq<V>(self, visitor: V) -> Result<V::Value>
@@ -554,7 +590,7 @@ impl<'de, R: Read, CFG: Cfg> de::Deserializer<'de> for &mut Deserializer<'de, R,
             len => Some(len),
         };
 
-        let value = visitor.visit_seq(SeqAccess { deserializer: self, len })?;
+        let value = self.recurse(|de| visitor.visit_seq(SeqAccess { deserializer: de, len }))?;
 
         if len.is_none() {
             self.input.end_skippable()?;
@@ -567,7 +603,7 @@ impl<'de, R: Read, CFG: Cfg> de::Deserializer<'de> for &mut Deserializer<'de, R,
     where
         V: Visitor<'de>,
     {
-        visitor.visit_seq(SeqAccess { deserializer: self, len: Some(len) })
+        self.recurse(|de| visitor.visit_seq(SeqAccess { deserializer: de, len: Some(len) }))
     }
 
     fn deserialize_tuple_struct<V>(self, _name: &'static str, len: usize, visitor: V) -> Result<V::Value>
@@ -593,7 +629,7 @@ impl<'de, R: Read, CFG: Cfg> de::Deserializer<'de> for &mut Deserializer<'de, R,
             len => Some(len),
         };
 
-        let value = visitor.visit_map(MapAccess { deserializer: self, len })?;
+        let value = self.recurse(|de| visitor.visit_map(MapAccess { deserializer: de, len }))?;
 
         if len.is_none() {
             self.input.end_skippable()?;
@@ -610,21 +646,24 @@ impl<'de, R: Read, CFG: Cfg> de::Deserializer<'de> for &mut Deserializer<'de, R,
     {
         let len = self.read_varint_usize()?;
 
-        if CFG::with_idents() {
+        if WITH_IDENTS {
             if cfg!(postbag_fast_compile) {
                 // Buffered path: eagerly buffer all field data and reorder to match
                 // the expected field declaration order, then use `visit_seq`.
                 // Produces significantly less monomorphized code at the cost of
                 // buffering the entire struct payload in memory.
-                visitor.visit_seq(BufferedFieldSeqAccess::<CFG>::new(self, fields, len)?)
+                self.recurse(|de| {
+                    let access = BufferedFieldSeqAccess::<WITH_IDENTS>::new(de, fields, len)?;
+                    visitor.visit_seq(access)
+                })
             } else {
                 // Streaming path (default): read field identifiers and values
                 // directly from the wire using `visit_map` with skippable blocks.
-                visitor.visit_map(StructFieldAccess { deserializer: self, len })
+                self.recurse(|de| visitor.visit_map(StructFieldAccess { deserializer: de, len }))
             }
         } else {
             self.input.start_skippable();
-            let value = visitor.visit_seq(StructSeqAccess { deserializer: self, len })?;
+            let value = self.recurse(|de| visitor.visit_seq(StructSeqAccess { deserializer: de, len }))?;
             self.input.end_skippable()?;
             Ok(value)
         }
@@ -636,7 +675,7 @@ impl<'de, R: Read, CFG: Cfg> de::Deserializer<'de> for &mut Deserializer<'de, R,
     where
         V: Visitor<'de>,
     {
-        visitor.visit_enum(self)
+        self.recurse(|de| visitor.visit_enum(de))
     }
 
     fn deserialize_identifier<V>(self, visitor: V) -> Result<V::Value>
@@ -654,7 +693,9 @@ impl<'de, R: Read, CFG: Cfg> de::Deserializer<'de> for &mut Deserializer<'de, R,
     }
 }
 
-impl<'de, R: Read, CFG: Cfg> serde::de::VariantAccess<'de> for &mut Deserializer<'de, R, CFG> {
+impl<'de, R: Read, const WITH_IDENTS: bool> serde::de::VariantAccess<'de>
+    for &mut Deserializer<'de, R, WITH_IDENTS>
+{
     type Error = Error;
 
     fn unit_variant(self) -> Result<()> {
@@ -677,12 +718,14 @@ impl<'de, R: Read, CFG: Cfg> serde::de::VariantAccess<'de> for &mut Deserializer
     }
 }
 
-impl<'de, R: Read, CFG: Cfg> serde::de::EnumAccess<'de> for &mut Deserializer<'de, R, CFG> {
+impl<'de, R: Read, const WITH_IDENTS: bool> serde::de::EnumAccess<'de>
+    for &mut Deserializer<'de, R, WITH_IDENTS>
+{
     type Error = Error;
     type Variant = Self;
 
     fn variant_seed<V: DeserializeSeed<'de>>(self, seed: V) -> Result<(V::Value, Self)> {
-        let v = if CFG::with_idents() {
+        let v = if WITH_IDENTS {
             let ident = self.read_identifier()?;
             let deserializer: StringDeserializer<Error> = ident.into_deserializer();
             DeserializeSeed::deserialize(seed, deserializer)?

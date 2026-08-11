@@ -15,17 +15,16 @@ use postbag::{
 /// Performs serialization followed by deserialization and checks that the
 /// deserialized value is unchanged.
 #[track_caller]
-pub fn loopback_with_cfg<T, CFG>(value: &T)
+pub fn loopback_with_cfg<T, const WITH_IDENTS: bool>(value: &T, cfg: Cfg<WITH_IDENTS>)
 where
     T: Serialize + DeserializeOwned + Debug + Eq,
-    CFG: Cfg,
 {
     let mut serialized = Vec::new();
-    serialize::<CFG, _, _>(&mut serialized, value).expect("serialization failed");
+    serialize(cfg, &mut serialized, value).expect("serialization failed");
     println!("{serialized:02x?}");
     dbg!(serialized.len());
 
-    let deserialized: T = deserialize::<CFG, _, _>(serialized.as_slice()).expect("deserialization failed");
+    let deserialized: T = deserialize(cfg, serialized.as_slice()).expect("deserialization failed");
 
     assert_eq!(*value, deserialized, "deserialized value does not match original value");
 }
@@ -38,10 +37,10 @@ where
     T: Serialize + DeserializeOwned + Debug + Eq,
 {
     println!("Testing with field names");
-    loopback_with_cfg::<_, Full>(&value);
+    loopback_with_cfg(&value, Full::new());
 
     println!("Testing without field names");
-    loopback_with_cfg::<_, Slim>(&value);
+    loopback_with_cfg(&value, Slim::new());
 }
 
 // =============================================================================
@@ -834,7 +833,7 @@ fn error_handling_vec_bounds() {
     // This won't actually prove anything since tests will likely always be
     // run on devices with larger amounts of memory, but it can't hurt.
     assert!(matches!(
-        deserialize::<Slim, _, Vec<u8>>([(1 << 7) | 8, 255, 255, 255, 0, 0, 0, 0, 0].as_slice()),
+        deserialize::<_, Vec<u8>, false>(Slim::new(), [(1 << 7) | 8, 255, 255, 255, 0, 0, 0, 0, 0].as_slice()),
         Err(Error::Io(io)) if io.kind() == ErrorKind::UnexpectedEof
     ));
 }
@@ -843,7 +842,7 @@ fn error_handling_vec_bounds() {
 fn varint_boundary_tests() {
     loopback(u32::MAX);
 
-    let deser = deserialize::<Slim, _, u32>([0xFF, 0xFF, 0xFF, 0xFF, 0x1F].as_slice());
+    let deser = deserialize::<_, u32, false>(Slim::new(), [0xFF, 0xFF, 0xFF, 0xFF, 0x1F].as_slice());
     assert!(matches!(deser, Err(Error::BadVarint)));
 }
 
@@ -897,11 +896,11 @@ fn serde_alias_compat() {
     // Serialize with old field name, deserialize with new struct that has alias.
     // This only works in Full mode (field names are serialized).
     let mut serialized = Vec::new();
-    serialize::<Full, _, _>(&mut serialized, &old).expect("serialization failed");
+    serialize(Full::new(), &mut serialized, &old).expect("serialization failed");
     println!("old serialized: {serialized:02x?}");
 
     let new: Exposure =
-        deserialize::<Full, _, _>(serialized.as_slice()).expect("deserialization with alias failed");
+        deserialize(Full::new(), serialized.as_slice()).expect("deserialization with alias failed");
     assert_eq!(new.gain, old.gain);
     assert_eq!(new.time_usec, old.time_100usec);
 }

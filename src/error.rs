@@ -24,6 +24,8 @@ pub enum Error {
     BadLen,
     /// Bad identifier
     BadIdentifier,
+    /// Recursion limit exceeded while deserializing deeply nested data
+    RecursionLimit,
     /// Overflow of target usize
     UsizeOverflow,
     /// Serde custom error
@@ -68,6 +70,7 @@ impl Display for Error {
             BadString => write!(f, "invalid string"),
             BadOption => write!(f, "invalid option"),
             BadIdentifier => write!(f, "invalid identifier"),
+            RecursionLimit => write!(f, "recursion limit exceeded"),
             BadEnum => write!(f, "invalid enum discriminant"),
             BadLen => write!(f, "invalid length"),
             UsizeOverflow => write!(f, "usize overflow"),
