@@ -2,8 +2,17 @@
 
 use std::fmt;
 
+mod sealed {
+    pub trait Sealed {}
+
+    impl<const WITH_IDENTS: bool> Sealed for super::StaticCfg<WITH_IDENTS> {}
+}
+
 /// Configuration trait.
-pub trait Cfg {
+///
+/// This trait is sealed and cannot be implemented outside of Postbag.
+/// Use [`Full`] or [`Slim`].
+pub trait Cfg: sealed::Sealed {
     /// Whether struct field identifiers and enum variant identifiers
     /// are serialized.
     fn with_idents() -> bool;
