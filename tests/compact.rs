@@ -58,14 +58,13 @@ where
     serialize::<CFG, _, _>(&mut compact, &Compact(value.clone())).expect("compact serialization failed");
 
     println!("{value:?}: plain {plain_len:?} bytes, compact {} bytes", compact.len());
-    if let Some(plain_len) = plain_len
-        && check_size
-        && CFG::with_idents()
-    {
-        assert!(
-            compact.len() <= plain_len,
-            "compacted representation of {value:?} is larger than plain representation"
-        );
+    if check_size && CFG::with_idents() {
+        if let Some(plain_len) = plain_len {
+            assert!(
+                compact.len() <= plain_len,
+                "compacted representation of {value:?} is larger than plain representation"
+            );
+        }
     }
 
     let deserialized: Compact<T> =

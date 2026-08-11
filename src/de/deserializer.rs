@@ -468,7 +468,7 @@ impl<'de, R: Read, CFG: Cfg> de::Deserializer<'de> for &mut Deserializer<'de, R,
         let bytes = self.input.read(sz)?;
 
         let character =
-            str::from_utf8(&bytes).map_err(|_| Error::BadChar)?.chars().next().ok_or(Error::BadChar)?;
+            std::str::from_utf8(&bytes).map_err(|_| Error::BadChar)?.chars().next().ok_or(Error::BadChar)?;
         visitor.visit_char(character)
     }
 
