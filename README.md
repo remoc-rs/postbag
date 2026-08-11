@@ -46,12 +46,12 @@ The `Full` configuration provides maximum compatibility and schema evolution cap
 
 - **Forward/backward compatibility**: Fields and enum variants can be reordered, added, or removed
 - **Schema evolution**: Safe evolution of data structures over time
-- **Numerical identifier encoding**: Fields named `_0` through `_59` are encoded with just a single byte
+- **Numerical identifier encoding**: Struct fields and enum variants named `_0` through `_59` are encoded with just a single byte
 
 #### Numerical Identifier Encoding
 
-When using `Full` configuration, fields named `_n` (where `n` is 0-59) are encoded using just a single byte instead of the full string. Use `#[serde(rename = "...")]` to specify the numerical id for each field.
-This can significantly reduce serialized size for structs with many fields:
+When using `Full` configuration, struct fields and enum variants named `_n` (where `n` is 0-59) are encoded using just a single byte instead of the full string. Use `#[serde(rename = "...")]` to specify the numerical id for each field or variant.
+This can significantly reduce serialized size for structs with many fields and enums with long variant names:
 
 ```rust
 use serde::{Serialize, Deserialize};
@@ -65,9 +65,32 @@ struct CompactData {
     // Regular field names work normally
     normal_field: bool,
 }
+
+#[derive(Serialize, Deserialize)]
+enum CompactEnum {
+    #[serde(rename = "_0")]
+    MyLongVariantName,
+    #[serde(rename = "_1")]
+    AnotherLongVariantName(u32),
+    #[serde(rename = "_2")]
+    YetAnotherVariant {
+        // Fields of struct variants can be numbered as well
+        #[serde(rename = "_0")]
+        my_field: u32,
+    },
+    // Regular variant names work normally
+    NormalVariant,
+}
 ```
 
-This feature is entirely optional; regular field names continue to work as expected. Fields with normal and numerical names can be mixed without limitations in a single struct.
+This feature is entirely optional; regular field and variant names continue to work as expected. Normal and numerical names can be mixed without limitations within a single struct or enum.
+
+Names that do not have the form `_n`, as well as ids of 60 and above, are encoded as regular strings.
+Since the identifier determines compatibility, changing the id of a field or variant is a breaking change,
+but fields and variants can be reordered freely.
+
+In addition, the [`compact`](https://docs.rs/postbag/latest/postbag/compact/) module provides more
+efficient representations of common types from the standard library.
 
 ### `Slim` Configuration
 

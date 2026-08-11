@@ -452,6 +452,53 @@ fn added_enum_variants_full_encoding() {
     assert_eq!(original_v1, OriginalWithOther::Variant1);
 }
 
+#[test]
+fn reordered_enum_variants_with_numerical_ids_full_encoding() {
+    #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+    enum Original {
+        #[serde(rename = "_0")]
+        MyLongVariantName(u32),
+        #[serde(rename = "_1")]
+        AnotherLongVariantName,
+        #[serde(rename = "_2")]
+        VariantWithFields {
+            #[serde(rename = "_0")]
+            value: u8,
+        },
+    }
+
+    // The variants are reordered and a new one is inserted in the middle,
+    // but their numerical identifiers are preserved.
+    #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+    enum Reordered {
+        #[serde(rename = "_2")]
+        VariantWithFields {
+            #[serde(rename = "_0")]
+            value: u8,
+        },
+        #[serde(rename = "_5")]
+        AddedVariant(bool),
+        #[serde(rename = "_1")]
+        AnotherLongVariantName,
+        #[serde(rename = "_0")]
+        MyLongVariantName(u32),
+    }
+
+    let unit: Reordered = transform::<_, _, Full>(&Original::AnotherLongVariantName);
+    assert_eq!(unit, Reordered::AnotherLongVariantName);
+
+    let newtype: Reordered = transform::<_, _, Full>(&Original::MyLongVariantName(42));
+    assert_eq!(newtype, Reordered::MyLongVariantName(42));
+
+    let structed: Reordered = transform::<_, _, Full>(&Original::VariantWithFields { value: 9 });
+    assert_eq!(structed, Reordered::VariantWithFields { value: 9 });
+
+    // A numerically identified variant occupies a single byte.
+    let mut serialized = Vec::new();
+    serialize::<Full, _, _>(&mut serialized, &Original::AnotherLongVariantName).unwrap();
+    assert_eq!(serialized.len(), 1);
+}
+
 #[derive(Deserialize, Serialize, Debug, PartialEq, Eq)]
 struct AccountCredentials {
     id: String,
