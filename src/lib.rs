@@ -3,6 +3,7 @@
 #![doc = include_str!("../README.md")]
 
 pub mod cfg;
+pub mod compact;
 mod de;
 mod error;
 pub mod fixint;

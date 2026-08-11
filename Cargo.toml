@@ -14,7 +14,7 @@ categories = ["encoding"]
 keywords = ["serde"]
 
 [dependencies]
-serde = "1.0.228"
+serde = { version = "1.0.228", features = ["derive"] }
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }
