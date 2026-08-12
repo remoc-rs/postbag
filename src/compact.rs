@@ -23,41 +23,77 @@
 //!     duration: Duration,
 //! }
 //! ```
+//!
+//! Serialization borrows from the value, thus it never clones it. Shared
+//! references are supported as well and yield the same representation.
+//!
+//! ```rust
+//! # use serde::Serialize;
+//! # use std::time::Duration;
+//! #[derive(Serialize)]
+//! pub struct MyDataRef<'a> {
+//!     #[serde(with = "postbag::compact")]
+//!     result: &'a Result<u32, String>,
+//!     #[serde(with = "postbag::compact")]
+//!     duration: &'a Duration,
+//! }
+//! ```
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// A type that can use a compacted representation for serialization.
-pub trait Compactable: Sized {
+/// A type that can be serialized using a compacted representation.
+///
+/// This is also implemented for shared references to compactable types.
+pub trait AsCompact {
     /// Type of compacted representation.
-    type Compacted: From<Self> + Into<Self>;
+    ///
+    /// It may borrow from the value it was created from.
+    type Compacted<'a>
+    where
+        Self: 'a;
 
-    /// Transform into compacted representation.
-    fn into_compacted(self) -> Self::Compacted {
-        Self::Compacted::from(self)
-    }
+    /// Returns the compacted representation of this value.
+    fn as_compacted(&self) -> Self::Compacted<'_>;
+}
 
-    /// Transform from compacted representation.
-    fn from_compacted(compacted: Self::Compacted) -> Self {
-        compacted.into()
+impl<T> AsCompact for &T
+where
+    T: AsCompact + ?Sized,
+{
+    type Compacted<'a>
+        = T::Compacted<'a>
+    where
+        Self: 'a;
+
+    fn as_compacted(&self) -> Self::Compacted<'_> {
+        T::as_compacted(self)
     }
 }
 
+/// A type that can be deserialized from a compacted representation.
+pub trait FromCompact: Sized {
+    /// Type of compacted representation.
+    type Compacted;
+
+    /// Creates the value from its compacted representation.
+    fn from_compacted(compacted: Self::Compacted) -> Self;
+}
+
 /// Serialize value using compacted representation.
-pub fn serialize<T, S>(value: &T, serializer: S) -> std::result::Result<S::Ok, S::Error>
+pub fn serialize<'a, T, S>(value: &'a T, serializer: S) -> std::result::Result<S::Ok, S::Error>
 where
-    T: Compactable + Clone,
-    <T as Compactable>::Compacted: Serialize,
+    T: AsCompact + ?Sized,
+    <T as AsCompact>::Compacted<'a>: Serialize,
     S: Serializer,
 {
-    let compacted = value.clone().into_compacted();
-    compacted.serialize(serializer)
+    value.as_compacted().serialize(serializer)
 }
 
 /// Deserialize value from compacted representation.
 pub fn deserialize<'de, T, D>(deserializer: D) -> std::result::Result<T, D::Error>
 where
-    T: Compactable,
-    <T as Compactable>::Compacted: Deserialize<'de>,
+    T: FromCompact,
+    <T as FromCompact>::Compacted: Deserialize<'de>,
     D: Deserializer<'de>,
 {
     let compacted = T::Compacted::deserialize(deserializer)?;
@@ -93,8 +129,26 @@ impl<T, E> From<Result<T, E>> for std::result::Result<T, E> {
     }
 }
 
-impl<T, E> Compactable for std::result::Result<T, E> {
+impl<T, E> AsCompact for std::result::Result<T, E> {
+    type Compacted<'a>
+        = Result<&'a T, &'a E>
+    where
+        Self: 'a;
+
+    fn as_compacted(&self) -> Self::Compacted<'_> {
+        match self {
+            Ok(value) => Result::Ok(value),
+            Err(err) => Result::Err(err),
+        }
+    }
+}
+
+impl<T, E> FromCompact for std::result::Result<T, E> {
     type Compacted = Result<T, E>;
+
+    fn from_compacted(compacted: Self::Compacted) -> Self {
+        compacted.into()
+    }
 }
 
 const NANOS_PER_SEC: i128 = 1_000_000_000;
@@ -137,8 +191,20 @@ impl From<Duration> for std::time::Duration {
     }
 }
 
-impl Compactable for std::time::Duration {
+impl AsCompact for std::time::Duration {
+    type Compacted<'a> = Duration;
+
+    fn as_compacted(&self) -> Self::Compacted<'_> {
+        (*self).into()
+    }
+}
+
+impl FromCompact for std::time::Duration {
     type Compacted = Duration;
+
+    fn from_compacted(compacted: Self::Compacted) -> Self {
+        compacted.into()
+    }
 }
 
 /// Compact representation of [SystemTime](std::time::SystemTime).
@@ -215,8 +281,25 @@ impl From<SystemTime> for std::time::SystemTime {
     }
 }
 
-impl Compactable for std::time::SystemTime {
+impl AsCompact for std::time::SystemTime {
+    type Compacted<'a> = SystemTime;
+
+    /// Returns the compacted representation of this value.
+    ///
+    /// # Panics
+    /// Panics if the seconds since [UNIX_EPOCH](std::time::UNIX_EPOCH) do not
+    /// fit into an [i64], which cannot occur on any supported platform.
+    fn as_compacted(&self) -> Self::Compacted<'_> {
+        (*self).into()
+    }
+}
+
+impl FromCompact for std::time::SystemTime {
     type Compacted = SystemTime;
+
+    fn from_compacted(compacted: Self::Compacted) -> Self {
+        compacted.into()
+    }
 }
 
 /// Compact representation of [Range](std::ops::Range).
@@ -235,8 +318,23 @@ impl<Idx> From<Range<Idx>> for std::ops::Range<Idx> {
     }
 }
 
-impl<Idx> Compactable for std::ops::Range<Idx> {
+impl<Idx> AsCompact for std::ops::Range<Idx> {
+    type Compacted<'a>
+        = Range<&'a Idx>
+    where
+        Self: 'a;
+
+    fn as_compacted(&self) -> Self::Compacted<'_> {
+        Range(&self.start, &self.end)
+    }
+}
+
+impl<Idx> FromCompact for std::ops::Range<Idx> {
     type Compacted = Range<Idx>;
+
+    fn from_compacted(compacted: Self::Compacted) -> Self {
+        compacted.into()
+    }
 }
 
 /// Compact representation of [RangeInclusive](std::ops::RangeInclusive).
@@ -256,8 +354,23 @@ impl<Idx> From<RangeInclusive<Idx>> for std::ops::RangeInclusive<Idx> {
     }
 }
 
-impl<Idx> Compactable for std::ops::RangeInclusive<Idx> {
+impl<Idx> AsCompact for std::ops::RangeInclusive<Idx> {
+    type Compacted<'a>
+        = RangeInclusive<&'a Idx>
+    where
+        Self: 'a;
+
+    fn as_compacted(&self) -> Self::Compacted<'_> {
+        RangeInclusive(self.start(), self.end())
+    }
+}
+
+impl<Idx> FromCompact for std::ops::RangeInclusive<Idx> {
     type Compacted = RangeInclusive<Idx>;
+
+    fn from_compacted(compacted: Self::Compacted) -> Self {
+        compacted.into()
+    }
 }
 
 /// Compact representation of [RangeFrom](std::ops::RangeFrom).
@@ -276,8 +389,23 @@ impl<Idx> From<RangeFrom<Idx>> for std::ops::RangeFrom<Idx> {
     }
 }
 
-impl<Idx> Compactable for std::ops::RangeFrom<Idx> {
+impl<Idx> AsCompact for std::ops::RangeFrom<Idx> {
+    type Compacted<'a>
+        = RangeFrom<&'a Idx>
+    where
+        Self: 'a;
+
+    fn as_compacted(&self) -> Self::Compacted<'_> {
+        RangeFrom(&self.start)
+    }
+}
+
+impl<Idx> FromCompact for std::ops::RangeFrom<Idx> {
     type Compacted = RangeFrom<Idx>;
+
+    fn from_compacted(compacted: Self::Compacted) -> Self {
+        compacted.into()
+    }
 }
 
 /// Compact representation of [RangeTo](std::ops::RangeTo).
@@ -296,8 +424,23 @@ impl<Idx> From<RangeTo<Idx>> for std::ops::RangeTo<Idx> {
     }
 }
 
-impl<Idx> Compactable for std::ops::RangeTo<Idx> {
+impl<Idx> AsCompact for std::ops::RangeTo<Idx> {
+    type Compacted<'a>
+        = RangeTo<&'a Idx>
+    where
+        Self: 'a;
+
+    fn as_compacted(&self) -> Self::Compacted<'_> {
+        RangeTo(&self.end)
+    }
+}
+
+impl<Idx> FromCompact for std::ops::RangeTo<Idx> {
     type Compacted = RangeTo<Idx>;
+
+    fn from_compacted(compacted: Self::Compacted) -> Self {
+        compacted.into()
+    }
 }
 
 /// Compact representation of [Bound](std::ops::Bound).
@@ -334,8 +477,27 @@ impl<T> From<Bound<T>> for std::ops::Bound<T> {
     }
 }
 
-impl<T> Compactable for std::ops::Bound<T> {
+impl<T> AsCompact for std::ops::Bound<T> {
+    type Compacted<'a>
+        = Bound<&'a T>
+    where
+        Self: 'a;
+
+    fn as_compacted(&self) -> Self::Compacted<'_> {
+        match self {
+            std::ops::Bound::Unbounded => Bound::Unbounded,
+            std::ops::Bound::Included(value) => Bound::Included(value),
+            std::ops::Bound::Excluded(value) => Bound::Excluded(value),
+        }
+    }
+}
+
+impl<T> FromCompact for std::ops::Bound<T> {
     type Compacted = Bound<T>;
+
+    fn from_compacted(compacted: Self::Compacted) -> Self {
+        compacted.into()
+    }
 }
 
 /// Compact representation of [IpAddr](std::net::IpAddr).
@@ -367,8 +529,20 @@ impl From<IpAddr> for std::net::IpAddr {
     }
 }
 
-impl Compactable for std::net::IpAddr {
+impl AsCompact for std::net::IpAddr {
+    type Compacted<'a> = IpAddr;
+
+    fn as_compacted(&self) -> Self::Compacted<'_> {
+        (*self).into()
+    }
+}
+
+impl FromCompact for std::net::IpAddr {
     type Compacted = IpAddr;
+
+    fn from_compacted(compacted: Self::Compacted) -> Self {
+        compacted.into()
+    }
 }
 
 /// Compact representation of [SocketAddrV6](std::net::SocketAddrV6).
@@ -393,8 +567,20 @@ impl From<SocketAddrV6> for std::net::SocketAddrV6 {
     }
 }
 
-impl Compactable for std::net::SocketAddrV6 {
+impl AsCompact for std::net::SocketAddrV6 {
+    type Compacted<'a> = SocketAddrV6;
+
+    fn as_compacted(&self) -> Self::Compacted<'_> {
+        (*self).into()
+    }
+}
+
+impl FromCompact for std::net::SocketAddrV6 {
     type Compacted = SocketAddrV6;
+
+    fn from_compacted(compacted: Self::Compacted) -> Self {
+        compacted.into()
+    }
 }
 
 /// Compact representation of [SocketAddr](std::net::SocketAddr).
@@ -426,6 +612,18 @@ impl From<SocketAddr> for std::net::SocketAddr {
     }
 }
 
-impl Compactable for std::net::SocketAddr {
+impl AsCompact for std::net::SocketAddr {
+    type Compacted<'a> = SocketAddr;
+
+    fn as_compacted(&self) -> Self::Compacted<'_> {
+        (*self).into()
+    }
+}
+
+impl FromCompact for std::net::SocketAddr {
     type Compacted = SocketAddr;
+
+    fn from_compacted(compacted: Self::Compacted) -> Self {
+        compacted.into()
+    }
 }
