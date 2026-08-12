@@ -5,17 +5,10 @@
 - Added `compact` module providing more efficient representations of common
   standard library types.
 - Configuration is now passed as a value to `serialize` and `deserialize`,
-  replacing the `Cfg` trait and its type parameter. `cfg::Cfg` is now a struct
-  carrying the configuration; use `cfg::Full` and `cfg::Slim` to name one, for
-  example `serialize(Full::new(), &mut writer, &value)`. New knobs can thus be
-  added without changing the signature of the serialization functions.
+  replacing the `Cfg` trait and its type parameter.
 - Added `to_vec` and `from_slice`, which take a configuration.
-  The `*_full` and `*_slim` convenience functions are unchanged.
 - Added a limit on the nesting depth of serialized and deserialized data,
-  defaulting to `cfg::DEFAULT_DEPTH_LIMIT` (128). Previously, deeply nested (in
-  particular recursive) types allowed untrusted input to abort the process by
-  overflowing the stack. Use `Cfg::with_depth_limit` to specify a different
-  limit.
+  defaulting to `cfg::DEFAULT_DEPTH_LIMIT` (128).
 - Minimum supported Rust version (MSRV) is 1.95
 
 ## 0.4.3
