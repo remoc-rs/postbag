@@ -10,7 +10,7 @@
 //! on the bytes notices when one of them stops doing so.
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::{collections::BTreeMap, fmt::Debug};
+use std::{collections::BTreeMap, fmt::Debug, marker::PhantomData};
 
 use postbag::{
     cfg::{Full, Slim, Version},
@@ -399,6 +399,28 @@ fn slim_needs_its_count_because_a_field_can_be_empty() {
 
     assert_eq!(back, Units { a: (), b: () });
     assert_eq!(bytes, b"\x02\x00", "the count is all there is");
+
+    // A marker field is ordinary in a generic struct and zero sized.
+    #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+    struct Marked {
+        a: u32,
+        marker: PhantomData<u8>,
+    }
+
+    #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+    struct Unmarked {
+        a: u32,
+    }
+
+    let marked = postbag::to_vec(Slim::new(), &Marked { a: 300, marker: PhantomData }).unwrap();
+    let unmarked = postbag::to_vec(Slim::new(), &Unmarked { a: 300 }).unwrap();
+
+    assert_eq!(marked, b"\x02\x02\xac\x02");
+    assert_eq!(unmarked, b"\x01\x02\xac\x02");
+    assert_eq!(marked[1..], unmarked[1..], "only the count tells them apart");
+
+    let err = postbag::from_slice::<Marked, _>(Slim::new(), unmarked.as_slice()).unwrap_err();
+    assert!(err.to_string().contains("invalid length"), "got {err}");
 }
 
 // --------------------------------------------------------------------------

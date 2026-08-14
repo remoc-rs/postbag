@@ -10,7 +10,11 @@ use std::{cell::RefCell, collections::BTreeMap, fmt::Debug};
 
 use serde::{Deserialize, Serialize, Serializer, de::DeserializeOwned};
 
-use postbag::{Error, cfg::Cfg, cfg::Full, cfg::Slim, from_full_slice, to_full_vec, to_slim_vec};
+use postbag::{
+    Error,
+    cfg::{Cfg, Full, Slim},
+    from_full_slice, to_full_vec, to_slim_vec,
+};
 
 /// Serializes an iterator, which is what reaches the uncounted path.
 struct Uncounted<I>(RefCell<Option<I>>);
