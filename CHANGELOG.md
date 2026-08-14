@@ -2,8 +2,13 @@
 
 ## 1.0.0
 
-- **Wire format change:** avoid duplication of lengths of strings and byte
-  arrays. To be compatible with Postbag 0.4 and use `cfg::SizeHints::All`.
+This release includes some serialization format changes. 
+To be compatible with Postbag 0.4 use `cfg::Version::Postbag0_4`.
+
+- Format: deduplicate lengths of strings and byte arrays. 
+- Format: prefix each sequence element of sequences of 
+  unknown length with a marker to reliably detect the end of the sequence,
+  even when types have zero size.
 - A field type can now be changed from `char` to `String` and vice versa.
 - Limit memory preallocation from size hints to prevent malicious data from
   overflowing a deserializer's memory
@@ -11,7 +16,6 @@
   standard library types.
 - Configuration is now passed as a value to `serialize` and `deserialize`,
   replacing the `Cfg` trait and its type parameter.
-- Added `to_vec` and `from_slice`, which take a configuration.
 - Added a limit on the nesting depth of serialized and deserialized data,
   defaulting to `cfg::DEFAULT_DEPTH_LIMIT` (128).
 - Minimum supported Rust version (MSRV) is 1.95
