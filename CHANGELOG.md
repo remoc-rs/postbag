@@ -2,6 +2,11 @@
 
 ## 1.0.0
 
+- **Wire format change:** avoid duplication of lengths of strings and byte
+  arrays. To be compatible with Postbag 0.4 and use `cfg::SizeHints::All`.
+- A field type can now be changed from `char` to `String` and vice versa.
+- Limit memory preallocation from size hints to prevent malicious data from
+  overflowing a deserializer's memory
 - Added `compact` module providing more efficient representations of common
   standard library types.
 - Configuration is now passed as a value to `serialize` and `deserialize`,
