@@ -11,6 +11,7 @@ pub mod compact;
 mod de;
 mod error;
 pub mod fixint;
+mod id;
 mod ser;
 mod varint;
 
@@ -22,10 +23,6 @@ const SOME: u8 = 1;
 
 const SPECIAL_LEN: usize = 125;
 const UNKNOWN_LEN: usize = 0;
-
-const ID_LEN: usize = 64;
-const ID_LEN_NAME: usize = ID_LEN + 1;
-const ID_COUNT: usize = 60;
 
 pub use de::{deserialize, deserialize_full, deserialize_slim, from_full_slice, from_slice, from_slim_slice};
 pub use error::{Error, Result};

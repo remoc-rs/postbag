@@ -3,9 +3,10 @@ use std::io::Write;
 use serde::{Serialize, ser};
 
 use crate::{
-    FALSE, ID_COUNT, ID_LEN, ID_LEN_NAME, NONE, SOME, SPECIAL_LEN, TRUE, UNKNOWN_LEN,
-    cfg::Cfg,
+    FALSE, NONE, SOME, SPECIAL_LEN, TRUE, UNKNOWN_LEN,
+    cfg::{Cfg, SizeHints},
     error::{Error, Result},
+    id::{ID_LEN, ID_LEN_NAME, ident_number},
     ser::skippable::SkipWrite,
     varint::*,
 };
@@ -14,12 +15,27 @@ use crate::{
 pub struct Serializer<W, const WITH_IDENTS: bool> {
     output: SkipWrite<W>,
     remaining_depth: usize,
+    size_hints: SizeHints,
+    /// Whether the value about to be serialized reaches the end of the
+    /// enclosing skippable block, so that it need not state its own length.
+    ///
+    /// Set immediately before serializing such a value and taken by the
+    /// `serialize_*` method that runs next. Every value nested inside another
+    /// is serialized through [`Self::recurse`], which sets the flag from its
+    /// argument, so a nested value has the property only where the enclosing
+    /// one deliberately passes it on.
+    owns_block: bool,
 }
 
 impl<W: Write, const WITH_IDENTS: bool> Serializer<W, WITH_IDENTS> {
     /// Creates a new serializer using the specified configuration.
     pub fn new(write: W, cfg: Cfg<WITH_IDENTS>) -> Self {
-        Self { output: SkipWrite::new(write), remaining_depth: cfg.depth_limit() }
+        Self {
+            output: SkipWrite::new(write),
+            remaining_depth: cfg.depth_limit(),
+            size_hints: cfg.size_hints(),
+            owns_block: false,
+        }
     }
 
     /// Executes `f` with the nesting depth counter increased by one.
@@ -27,16 +43,37 @@ impl<W: Write, const WITH_IDENTS: bool> Serializer<W, WITH_IDENTS> {
     /// Fails with [`Error::RecursionLimit`] when the configured depth limit
     /// would be exceeded. This bounds stack usage, since serialization of
     /// nested data is recursive.
-    pub(crate) fn recurse<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+    ///
+    /// `owns_block` states whether the nested value reaches the end of the
+    /// enclosing skippable block; see [`Self::owns_block`]. It is `false` for
+    /// every value that has something written after it, which is all of them
+    /// except the single child of a construct that writes nothing of its own
+    /// afterwards.
+    pub(crate) fn recurse<T>(&mut self, owns_block: bool, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         let Some(remaining) = self.remaining_depth.checked_sub(1) else {
             return Err(Error::RecursionLimit);
         };
 
         self.remaining_depth = remaining;
+        self.owns_block = owns_block;
         let res = f(self);
         self.remaining_depth += 1;
 
         res
+    }
+
+    /// Whether the value being serialized reaches the end of its block, and
+    /// so can leave out its own length. Clears the flag.
+    fn takes_block(&mut self) -> bool {
+        std::mem::take(&mut self.owns_block)
+    }
+
+    /// Whether a field value may leave out its own length.
+    ///
+    /// Only in the `Full` configuration, which is the only one that wraps
+    /// field values in a block that states where they end.
+    fn field_owns_block(&self) -> bool {
+        WITH_IDENTS && !self.size_hints.value_writes_len()
     }
 
     /// Get the writer.
@@ -78,11 +115,11 @@ impl<W: Write, const WITH_IDENTS: bool> Serializer<W, WITH_IDENTS> {
     }
 
     fn write_identifier(&mut self, ident: &str) -> Result<()> {
-        match ident.strip_prefix("_").and_then(|s| s.parse::<usize>().ok()) {
-            Some(id) if id < ID_COUNT => {
+        match ident_number(ident) {
+            Some(id) => {
                 self.write_usize(ID_LEN_NAME + id)?;
             }
-            _ => {
+            None => {
                 let len = ident.len();
                 if len < ID_LEN {
                     self.write_usize(len)?;
@@ -183,13 +220,19 @@ where
     }
 
     fn serialize_str(self, v: &str) -> Result<()> {
-        self.write_usize(v.len())?;
+        // The length is the number of UTF-8 bytes and nothing else, so a value
+        // reaching the end of its block has already been given it.
+        if !self.takes_block() {
+            self.write_usize(v.len())?;
+        }
         self.output.write(v.as_bytes())?;
         Ok(())
     }
 
     fn serialize_bytes(self, v: &[u8]) -> Result<()> {
-        self.write_usize(v.len())?;
+        if !self.takes_block() {
+            self.write_usize(v.len())?;
+        }
         Ok(self.output.write(v)?)
     }
 
@@ -201,8 +244,11 @@ where
     where
         T: ?Sized + Serialize,
     {
+        // `Some` writes its tag and then the value, so the value still reaches
+        // the end of the block.
+        let owns_block = self.takes_block();
         self.serialize_u8(SOME)?;
-        self.recurse(|ser| value.serialize(ser))
+        self.recurse(owns_block, |ser| value.serialize(ser))
     }
 
     fn serialize_unit(self) -> Result<()> {
@@ -228,7 +274,10 @@ where
     where
         T: ?Sized + Serialize,
     {
-        self.recurse(|ser| value.serialize(ser))
+        // A newtype struct writes nothing of its own, so the value keeps the
+        // whole block.
+        let owns_block = self.takes_block();
+        self.recurse(owns_block, |ser| value.serialize(ser))
     }
 
     fn serialize_newtype_variant<T>(
@@ -237,12 +286,17 @@ where
     where
         T: ?Sized + Serialize,
     {
+        let owns_block = self.takes_block();
+
         if WITH_IDENTS {
             self.write_identifier(variant)?;
         } else {
             self.write_u32(variant_index)?;
         }
-        self.recurse(|ser| value.serialize(ser))?;
+
+        // The identifier comes first and the payload still reaches the end of
+        // the block.
+        self.recurse(owns_block, |ser| value.serialize(ser))?;
 
         Ok(())
     }
@@ -302,7 +356,11 @@ where
     }
 
     fn serialize_struct(self, _name: &'static str, len: usize) -> Result<Self::SerializeStruct> {
-        self.write_usize(len)?;
+        // The block a field value sits in already says where the fields end,
+        // and in `Full` no field is empty, so the count can be left out.
+        if !self.takes_block() {
+            self.write_usize(len)?;
+        }
 
         if !WITH_IDENTS {
             self.output.start_skippable();
@@ -314,13 +372,18 @@ where
     fn serialize_struct_variant(
         self, _name: &'static str, variant_index: u32, variant: &'static str, len: usize,
     ) -> Result<Self::SerializeStructVariant> {
+        let owns_block = self.takes_block();
+
         if WITH_IDENTS {
             self.write_identifier(variant)?;
         } else {
             self.write_u32(variant_index)?;
         }
 
-        self.write_usize(len)?;
+        // As for a plain struct, with the identifier written first.
+        if !owns_block {
+            self.write_usize(len)?;
+        }
 
         if !WITH_IDENTS {
             self.output.start_skippable();
@@ -347,7 +410,7 @@ where
     where
         T: ?Sized + Serialize,
     {
-        self.serializer.recurse(|ser| value.serialize(ser))
+        self.serializer.recurse(false, |ser| value.serialize(ser))
     }
 
     fn end(self) -> Result<()> {
@@ -371,7 +434,7 @@ where
     where
         T: ?Sized + Serialize,
     {
-        (**self).recurse(|ser| value.serialize(ser))
+        (**self).recurse(false, |ser| value.serialize(ser))
     }
 
     fn end(self) -> Result<()> {
@@ -391,7 +454,7 @@ where
     where
         T: ?Sized + Serialize,
     {
-        (**self).recurse(|ser| value.serialize(ser))
+        (**self).recurse(false, |ser| value.serialize(ser))
     }
 
     fn end(self) -> Result<()> {
@@ -411,7 +474,7 @@ where
     where
         T: ?Sized + Serialize,
     {
-        (**self).recurse(|ser| value.serialize(ser))
+        (**self).recurse(false, |ser| value.serialize(ser))
     }
 
     fn end(self) -> Result<()> {
@@ -436,7 +499,7 @@ where
     where
         T: ?Sized + Serialize,
     {
-        self.serializer.recurse(|ser| key.serialize(ser))
+        self.serializer.recurse(false, |ser| key.serialize(ser))
     }
 
     #[inline(never)]
@@ -444,7 +507,7 @@ where
     where
         T: ?Sized + Serialize,
     {
-        self.serializer.recurse(|ser| value.serialize(ser))
+        self.serializer.recurse(false, |ser| value.serialize(ser))
     }
 
     fn end(self) -> Result<()> {
@@ -473,7 +536,10 @@ where
             self.output.start_skippable();
         }
 
-        (**self).recurse(|ser| value.serialize(ser))?;
+        // The block just started ends where this value does, so the value can
+        // leave out a length of its own.
+        let owns_block = self.field_owns_block();
+        (**self).recurse(owns_block, |ser| value.serialize(ser))?;
 
         if WITH_IDENTS {
             self.output.end_skippable()?;
@@ -508,7 +574,10 @@ where
             self.output.start_skippable();
         }
 
-        (**self).recurse(|ser| value.serialize(ser))?;
+        // The block just started ends where this value does, so the value can
+        // leave out a length of its own.
+        let owns_block = self.field_owns_block();
+        (**self).recurse(owns_block, |ser| value.serialize(ser))?;
 
         if WITH_IDENTS {
             self.output.end_skippable()?;

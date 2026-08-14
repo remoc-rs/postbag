@@ -9,9 +9,12 @@ Postbag is a high-performance binary [serde] codec for Rust that provides effici
 
 ## Key Features
 
-- **Full fidelity of Rust type system**: Supports all serde-compatible types including structs, enums, tuples, arrays, maps, and all primitive types
+- **Full fidelity of Rust type system**: Structs, enums, tuples, arrays, maps and all primitive types keep their shape; `Some(None)` stays distinct from `None`, and 128-bit integers stay integers.
 - **Efficient binary format**: Uses variable-length encoding (varint) for integers, compact representations for common types, and minimal overhead
 - **Configurable compatibility**: Choose between space-efficient encoding (`Slim`) or forward/backward compatible encoding (`Full`) with field identifiers
+
+### Limitations
+Like every non-self-describing format, Postbag cannot serve serde's `untagged`, internally tagged and `flatten` attributes, which need to inspect a value to decide how to read it.
 
 ## Quick Start
 
@@ -65,6 +68,7 @@ The `Full` configuration provides maximum compatibility and schema evolution cap
 
 - **Forward/backward compatibility**: Fields and enum variants can be reordered, added, or removed
 - **Schema evolution**: Safe evolution of data structures over time
+- **Widening `char` to `String` and vice versa**: the two encode identically, and a peer that still expects a `char` reads the first character instead of failing
 - **Numerical identifier encoding**: Struct fields and enum variants named `_0` through `_59` are encoded with just a single byte
 
 #### Numerical Identifier Encoding
@@ -105,8 +109,8 @@ enum CompactEnum {
 This feature is entirely optional; regular field and variant names continue to work as expected. Normal and numerical names can be mixed without limitations within a single struct or enum.
 
 Names that do not have the form `_n`, as well as ids of 60 and above, are encoded as regular strings.
-Since the identifier determines compatibility, changing the id of a field or variant is a breaking change,
-but fields and variants can be reordered freely.
+Since the identifier determines compatibility, changing the id of a field or variant is a breaking change, but fields and variants can be reordered freely.
+An id that has been retired should never be given to a different field or variant. 
 
 In addition, the [`compact`](https://docs.rs/postbag/latest/postbag/compact/) module provides more
 efficient representations of common types from the standard library.

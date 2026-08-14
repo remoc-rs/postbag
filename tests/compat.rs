@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::fmt::Debug;
 
 use postbag::{
-    cfg::{Cfg, Full, Slim},
+    cfg::{Cfg, Full, SizeHints, Slim},
     deserialize, serialize,
 };
 
@@ -763,4 +763,189 @@ fn removed_struct_variant_field_from_middle() {
     let B::V2 { f1, f3 } = b else { panic!("wrong variant") };
     assert_eq!(f1, 1);
     assert_eq!(f3, 3);
+}
+
+#[test]
+fn changed_fields_of_a_nested_struct() {
+    // A struct that fills a field's block writes no field count, so the reader
+    // finds the end of its fields by the end of the block. Adding, removing
+    // and reordering fields has to keep working across that.
+    #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+    struct OuterA {
+        #[serde(rename = "_0")]
+        inner: InnerA,
+        #[serde(rename = "_1")]
+        after: u32,
+    }
+
+    #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+    struct InnerA {
+        #[serde(default)]
+        f1: u32,
+        f2: String,
+        #[serde(default)]
+        f3: bool,
+    }
+
+    #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+    struct OuterB {
+        #[serde(rename = "_0")]
+        inner: InnerB,
+        #[serde(rename = "_1")]
+        after: u32,
+    }
+
+    #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+    struct InnerB {
+        f2: String,
+        #[serde(default)]
+        f4: Option<u32>,
+    }
+
+    let value = OuterA { inner: InnerA { f1: 7, f2: "x".into(), f3: true }, after: 300 };
+
+    for cfg in [Full::new(), Full::new().with_size_hints(SizeHints::All)] {
+        // Fields the reader does not know are skipped, one it never got
+        // takes its default, and the field after the struct is still found.
+        let b: OuterB = transform(&value, cfg);
+        assert_eq!(b.inner.f2, "x");
+        assert_eq!(b.inner.f4, None);
+        assert_eq!(b.after, 300);
+    }
+}
+
+#[test]
+#[cfg_attr(postbag_fast_compile, ignore = "fast_compile does not support adding fields in the middle")]
+fn restored_fields_of_a_nested_struct() {
+    // The other direction of `changed_fields_of_a_nested_struct`: the reader
+    // knows more fields than it is sent, including one before a field it does
+    // get, which is what the buffered path cannot do.
+    #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+    struct Outer<T> {
+        #[serde(rename = "_0")]
+        inner: T,
+        #[serde(rename = "_1")]
+        after: u32,
+    }
+
+    #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+    struct Sent {
+        f2: String,
+    }
+
+    #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+    struct Expected {
+        #[serde(default)]
+        f1: u32,
+        f2: String,
+        #[serde(default)]
+        f3: bool,
+    }
+
+    let value = Outer { inner: Sent { f2: "x".into() }, after: 300 };
+
+    for cfg in [Full::new(), Full::new().with_size_hints(SizeHints::All)] {
+        let got: Outer<Expected> = transform(&value, cfg);
+        assert_eq!(got.inner, Expected { f1: 0, f2: "x".into(), f3: false });
+        assert_eq!(got.after, 300);
+    }
+}
+
+#[test]
+fn a_nested_struct_that_loses_all_its_fields() {
+    // The block is then empty, which the reader must read as "no fields"
+    // rather than running off the end.
+    #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+    struct Outer<T> {
+        #[serde(rename = "_0")]
+        inner: T,
+        #[serde(rename = "_1")]
+        after: u32,
+    }
+
+    #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+    struct Empty {}
+
+    #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+    struct Filled {
+        #[serde(default)]
+        f1: u32,
+    }
+
+    for cfg in [Full::new(), Full::new().with_size_hints(SizeHints::All)] {
+        let value = Outer { inner: Empty {}, after: 300 };
+        let grown: Outer<Filled> = transform(&value, cfg);
+        assert_eq!(grown.inner.f1, 0);
+        assert_eq!(grown.after, 300);
+
+        let value = Outer { inner: Filled { f1: 7 }, after: 300 };
+        let shrunk: Outer<Empty> = transform(&value, cfg);
+        assert_eq!(shrunk.after, 300);
+    }
+}
+
+#[test]
+fn a_char_field_widened_to_a_string() {
+    // A char and a string encode identically as a field value, so widening
+    // one to the other is something people will do. Both directions have to
+    // stay readable: with remoc the same pair of programs talks both ways, so
+    // a widening that only works in one of them cannot be used at all.
+    #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+    struct AsChar {
+        #[serde(rename = "_0")]
+        unit: char,
+        #[serde(rename = "_1")]
+        after: u32,
+    }
+
+    #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+    struct AsString {
+        #[serde(rename = "_0")]
+        unit: String,
+        #[serde(rename = "_1")]
+        after: u32,
+    }
+
+    for cfg in [Full::new(), Full::new().with_size_hints(SizeHints::All)] {
+        // The updated peer reads what the old one sends, exactly.
+        let widened: AsString = transform(&AsChar { unit: '°', after: 300 }, cfg);
+        assert_eq!(widened, AsString { unit: "°".into(), after: 300 });
+
+        // The old peer reads what the updated one sends, keeping the first
+        // character and — this is the point — the rest of the message.
+        for sent in ["°C", "a", "hello, world"] {
+            let narrowed: AsChar = transform(&AsString { unit: sent.into(), after: 300 }, cfg);
+            assert_eq!(narrowed.unit, sent.chars().next().unwrap(), "reading {sent:?} as a char");
+            assert_eq!(narrowed.after, 300, "the field after {sent:?} was still found");
+        }
+
+        // Nothing at all is still not a character.
+        let empty = postbag::to_vec(cfg, &AsString { unit: String::new(), after: 300 }).unwrap();
+        assert!(postbag::from_slice::<AsChar, _>(cfg, empty.as_slice()).is_err());
+    }
+}
+
+#[test]
+fn a_name_that_looks_numbered_but_is_not() {
+    // `_07` parses as seven, but reading seven back gives `_7`. Encoding it
+    // as a number would lose the field, so it is written out as a name.
+    #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+    struct Padded {
+        #[serde(rename = "_07")]
+        #[serde(default)]
+        padded: u32,
+        #[serde(rename = "_7")]
+        #[serde(default)]
+        plain: u32,
+    }
+
+    let value = Padded { padded: 1, plain: 2 };
+
+    for cfg in [Full::new(), Full::new().with_size_hints(SizeHints::All)] {
+        let bytes = postbag::to_vec(cfg, &value).unwrap();
+        let back: Padded = postbag::from_slice(cfg, bytes.as_slice()).unwrap();
+
+        assert_eq!(back, value, "a padded name must not collide with its plain form");
+        assert!(bytes.windows(3).any(|w| w == b"_07"), "the name should be written out");
+    }
 }

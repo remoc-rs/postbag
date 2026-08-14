@@ -1,10 +1,12 @@
 //! Tests for the nesting depth limit.
 
-use serde::{Deserialize, Serialize};
+use std::fmt::Debug;
+
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use postbag::{
     Error,
-    cfg::{DEFAULT_DEPTH_LIMIT, Full, Slim},
+    cfg::{Cfg, DEFAULT_DEPTH_LIMIT, Full, Slim},
     from_full_slice, from_slice, from_slim_slice, to_full_vec, to_slim_vec, to_vec,
 };
 
@@ -196,4 +198,60 @@ fn serialization_and_deserialization_limits_agree() {
             }
         }
     }
+}
+
+/// Anything that can be written with a given limit must be readable with the
+/// same limit; otherwise the codec would produce data it cannot take back.
+#[track_caller]
+fn writable_is_readable<T, const WITH_IDENTS: bool>(what: &str, value: &T, cfg: Cfg<WITH_IDENTS>)
+where
+    T: Serialize + DeserializeOwned + Debug + PartialEq,
+{
+    let Ok(bytes) = to_vec(cfg, value) else { return };
+
+    let restored: T = from_slice(cfg, &bytes)
+        .unwrap_or_else(|err| panic!("{what}: written with {cfg:?} but not readable: {err}"));
+
+    assert_eq!(*value, restored, "{what}");
+}
+
+#[track_caller]
+fn limits_agree<T>(what: &str, value: &T)
+where
+    T: Serialize + DeserializeOwned + Debug + PartialEq,
+{
+    for limit in 0..=6 {
+        writable_is_readable(what, value, Full::new().with_depth_limit(limit));
+        writable_is_readable(what, value, Slim::new().with_depth_limit(limit));
+    }
+}
+
+#[test]
+fn limits_agree_where_the_two_sides_charge_differently() {
+    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    struct Empty {}
+
+    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    struct Wrapper {
+        inner: Empty,
+    }
+
+    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    enum Choice {
+        Unit,
+        Newtype(u8),
+        Struct { a: u8 },
+    }
+
+    limits_agree("bare scalar", &7u8);
+    limits_agree("empty struct", &Empty {});
+    limits_agree("struct holding an empty struct", &Wrapper { inner: Empty {} });
+    limits_agree("unit variant", &Choice::Unit);
+    limits_agree("newtype variant", &Choice::Newtype(7));
+    limits_agree("struct variant", &Choice::Struct { a: 7 });
+    limits_agree("string", &"x".to_string());
+    limits_agree("empty vec", &Vec::<u8>::new());
+    limits_agree("nested vec", &vec![vec![1u8, 2]]);
+    limits_agree("nested option", &Some(Some(1u8)));
+    limits_agree("tuple", &(1u8, "x".to_string()));
 }

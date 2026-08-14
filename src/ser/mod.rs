@@ -48,7 +48,7 @@ where
     // turns out to be empty (an empty struct or a unit enum variant). Without
     // this, serialization would accept values one level deeper than
     // deserialization, breaking round-tripping at the limit boundary.
-    serializer.recurse(|ser| value.serialize(ser))?;
+    serializer.recurse(false, |ser| value.serialize(ser))?;
     serializer.finalize();
     Ok(())
 }

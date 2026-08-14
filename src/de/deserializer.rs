@@ -1,22 +1,47 @@
-use std::{collections::HashMap, io::Read, marker::PhantomData};
+use std::{borrow::Cow, collections::HashMap, io::Read, marker::PhantomData};
 
 use serde::de::{
     self, DeserializeSeed, IntoDeserializer, Visitor,
-    value::{StringDeserializer, U32Deserializer},
+    value::{StrDeserializer, U32Deserializer},
 };
 
 use crate::{
-    FALSE, ID_COUNT, ID_LEN, ID_LEN_NAME, NONE, SOME, SPECIAL_LEN, TRUE, UNKNOWN_LEN,
-    cfg::Cfg,
+    FALSE, NONE, SOME, SPECIAL_LEN, TRUE, UNKNOWN_LEN,
+    cfg::{Cfg, SizeHints},
     de::skippable::SkipRead,
     error::{Error, Result},
+    id::{ID_LEN, ID_LEN_NAME, numbered_ident},
     varint::{max_of_last_byte, varint_max},
 };
+
+/// How many bytes follow a UTF-8 leading byte, or `None` if it does not
+/// begin a character.
+fn utf8_following_bytes(lead: u8) -> Option<usize> {
+    match lead {
+        0x00..=0x7f => Some(0),
+        0xc2..=0xdf => Some(1),
+        0xe0..=0xef => Some(2),
+        0xf0..=0xf4 => Some(3),
+        _ => None,
+    }
+}
+
+/// The first character of `bytes`, which must begin with one.
+fn first_char(bytes: &[u8]) -> Result<char> {
+    str::from_utf8(bytes).map_err(|_| Error::BadChar)?.chars().next().ok_or(Error::BadChar)
+}
 
 /// Deserializer.
 pub struct Deserializer<'de, R, const WITH_IDENTS: bool> {
     input: SkipRead<R>,
     remaining_depth: usize,
+    size_hints: SizeHints,
+    /// Whether the value about to be deserialized reaches the end of the
+    /// enclosing skippable block, so that it did not state its own length.
+    ///
+    /// The mirror of the flag of the same name in the serializer, and armed
+    /// at exactly the same places; see there.
+    owns_block: bool,
     _de: PhantomData<&'de ()>,
 }
 
@@ -26,12 +51,33 @@ where
 {
     /// Obtain a Deserializer from a reader, using the specified configuration.
     pub fn new(read: R, cfg: Cfg<WITH_IDENTS>) -> Self {
-        Self::with_depth_limit(read, cfg.depth_limit())
+        Self::with_depth_limit(read, cfg.depth_limit(), cfg.size_hints())
     }
 
     /// Obtain a Deserializer from a reader, using the specified nesting depth limit.
-    fn with_depth_limit(read: R, depth_limit: usize) -> Self {
-        Deserializer { input: SkipRead::new(read), remaining_depth: depth_limit, _de: PhantomData }
+    fn with_depth_limit(read: R, depth_limit: usize, size_hints: SizeHints) -> Self {
+        Deserializer {
+            input: SkipRead::new(read),
+            remaining_depth: depth_limit,
+            size_hints,
+            owns_block: false,
+            _de: PhantomData,
+        }
+    }
+
+    /// Obtain a Deserializer over the bytes of exactly one field value.
+    ///
+    /// The value fills them, so it may have left out a length of its own; the
+    /// bytes are treated as an open block so that reading to the end of the
+    /// value stays bounded by them.
+    fn for_field_value(read: R, len: usize, depth_limit: usize, size_hints: SizeHints) -> Self {
+        Deserializer {
+            input: SkipRead::new_value(read, len),
+            remaining_depth: depth_limit,
+            size_hints,
+            owns_block: WITH_IDENTS && !size_hints.value_writes_len(),
+            _de: PhantomData,
+        }
     }
 
     /// Returns the reader.
@@ -47,16 +93,44 @@ impl<'de, R: Read, const WITH_IDENTS: bool> Deserializer<'de, R, WITH_IDENTS> {
     /// would be exceeded. This bounds stack usage caused by deeply nested
     /// (in particular recursive) types, which would otherwise allow untrusted
     /// input to abort the process by overflowing the stack.
-    fn recurse<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+    ///
+    /// `owns_block` states whether the nested value reaches the end of the
+    /// enclosing skippable block; see [`Self::owns_block`]. It must be passed
+    /// exactly where the serializer passes it, or the two read and write
+    /// different bytes.
+    fn recurse<T>(&mut self, owns_block: bool, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         let Some(remaining) = self.remaining_depth.checked_sub(1) else {
             return Err(Error::RecursionLimit);
         };
 
         self.remaining_depth = remaining;
+        self.owns_block = owns_block;
         let res = f(self);
         self.remaining_depth += 1;
 
         res
+    }
+
+    /// Whether the value being deserialized reaches the end of its block, so
+    /// that it did not state its own length. Clears the flag.
+    fn takes_block(&mut self) -> bool {
+        std::mem::take(&mut self.owns_block)
+    }
+
+    /// Whether a field value left out its own length.
+    fn field_owns_block(&self) -> bool {
+        WITH_IDENTS && !self.size_hints.value_writes_len()
+    }
+
+    /// Reads a run of bytes that states its own length, or, when it reaches
+    /// the end of its block, runs to that end.
+    fn read_len_prefixed(&mut self) -> Result<Vec<u8>> {
+        if self.takes_block() {
+            self.input.read_rest()
+        } else {
+            let sz = self.read_varint_usize()?;
+            self.input.read(sz)
+        }
     }
 
     fn read_varint_usize(&mut self) -> Result<usize> {
@@ -136,22 +210,22 @@ impl<'de, R: Read, const WITH_IDENTS: bool> Deserializer<'de, R, WITH_IDENTS> {
         Err(Error::BadVarint)
     }
 
-    fn read_identifier(&mut self) -> Result<String> {
+    /// Reads a field or variant identifier.
+    ///
+    /// A numbered one is borrowed from [`numbered_ident`], so the common case
+    /// costs no allocation.
+    fn read_identifier(&mut self) -> Result<Cow<'static, str>> {
         let v = self.read_varint_usize()?;
-
-        if v >= ID_LEN_NAME + ID_COUNT {
-            return Err(Error::BadIdentifier);
-        }
 
         if v >= ID_LEN_NAME {
             let id = v - ID_LEN_NAME;
-            return Ok(format!("_{id}"));
+            return numbered_ident(id).map(Cow::Borrowed).ok_or(Error::BadIdentifier);
         }
 
         let len = if v == ID_LEN { self.read_varint_usize()? } else { v };
 
         let bytes = self.input.read(len)?;
-        String::from_utf8(bytes).map_err(|_| Error::BadIdentifier)
+        String::from_utf8(bytes).map(Cow::Owned).map_err(|_| Error::BadIdentifier)
     }
 }
 
@@ -221,7 +295,9 @@ impl<'a, 'b: 'a, R: Read, const WITH_IDENTS: bool> serde::de::SeqAccess<'b>
 /// buffering, using skippable blocks for forward compatibility.
 struct StructFieldAccess<'a, 'b, R, const WITH_IDENTS: bool> {
     deserializer: &'a mut Deserializer<'b, R, WITH_IDENTS>,
-    len: usize,
+    /// How many fields are left, or `None` when no count was written and the
+    /// fields instead run to the end of the enclosing block.
+    len: Option<usize>,
 }
 
 impl<'a, 'b: 'a, R: Read, const WITH_IDENTS: bool> serde::de::MapAccess<'b>
@@ -231,13 +307,17 @@ impl<'a, 'b: 'a, R: Read, const WITH_IDENTS: bool> serde::de::MapAccess<'b>
 
     #[inline(never)]
     fn next_key_seed<K: DeserializeSeed<'b>>(&mut self, seed: K) -> Result<Option<K::Value>> {
-        if self.len > 0 {
-            self.len -= 1;
-            let value = DeserializeSeed::deserialize(seed, &mut *self.deserializer)?;
-            Ok(Some(value))
-        } else {
-            Ok(None)
+        match &mut self.len {
+            Some(0) => return Ok(None),
+            Some(len) => *len -= 1,
+            // No field is empty in `Full`, so running out of block is the end
+            // of the fields and nothing else.
+            None if self.deserializer.input.block_exhausted()? => return Ok(None),
+            None => (),
         }
+
+        let value = DeserializeSeed::deserialize(seed, &mut *self.deserializer)?;
+        Ok(Some(value))
     }
 
     #[inline(never)]
@@ -245,14 +325,18 @@ impl<'a, 'b: 'a, R: Read, const WITH_IDENTS: bool> serde::de::MapAccess<'b>
         assert!(WITH_IDENTS);
 
         self.deserializer.input.start_skippable();
+        // The block just started ends where this value does, so the value may
+        // have left out a length of its own.
+        self.deserializer.owns_block = self.deserializer.field_owns_block();
         let value = DeserializeSeed::deserialize(seed, &mut *self.deserializer)?;
+        self.deserializer.owns_block = false;
         self.deserializer.input.end_skippable()?;
 
         Ok(value)
     }
 
     fn size_hint(&self) -> Option<usize> {
-        Some(self.len)
+        self.len
     }
 }
 
@@ -267,6 +351,7 @@ struct BufferedFieldSeqAccess<'de, const WITH_IDENTS: bool> {
     field_data: Vec<Option<Vec<u8>>>,
     index: usize,
     remaining_depth: usize,
+    size_hints: SizeHints,
     _phantom: PhantomData<&'de ()>,
 }
 
@@ -280,24 +365,40 @@ impl<'de, const WITH_IDENTS: bool> BufferedFieldSeqAccess<'de, WITH_IDENTS> {
     /// code duplication across the many `deserialize_struct` instantiations.
     #[inline(never)]
     fn new<R: Read>(
-        deser: &mut Deserializer<'_, R, WITH_IDENTS>, fields: &'static [&'static str], len: usize,
+        deser: &mut Deserializer<'_, R, WITH_IDENTS>, fields: &'static [&'static str], len: Option<usize>,
     ) -> Result<Self> {
         // Build index: field name -> position in expected order.
         let field_index: HashMap<&'static str, usize> =
             fields.iter().enumerate().map(|(i, &name)| (name, i)).collect();
 
-        // Read wire fields and place directly into the right slot.
+        // Read wire fields and place directly into the right slot. Without a
+        // count the fields run to the end of the block; no field is empty in
+        // `Full`, so that boundary is unambiguous.
         let mut field_data: Vec<Option<Vec<u8>>> = vec![None; fields.len()];
-        for _ in 0..len {
+        let mut remaining = len;
+        loop {
+            match &mut remaining {
+                Some(0) => break,
+                Some(n) => *n -= 1,
+                None if deser.input.block_exhausted()? => break,
+                None => (),
+            }
+
             let ident = deser.read_identifier()?;
             let raw = deser.input.read_skippable_block()?;
-            if let Some(&idx) = field_index.get(ident.as_str()) {
+            if let Some(&idx) = field_index.get(ident.as_ref()) {
                 field_data[idx] = Some(raw);
             }
             // Unknown fields (forward compat) are silently dropped.
         }
 
-        Ok(Self { field_data, index: 0, remaining_depth: deser.remaining_depth, _phantom: PhantomData })
+        Ok(Self {
+            field_data,
+            index: 0,
+            remaining_depth: deser.remaining_depth,
+            size_hints: deser.size_hints,
+            _phantom: PhantomData,
+        })
     }
 }
 
@@ -320,8 +421,12 @@ impl<'de, const WITH_IDENTS: bool> serde::de::SeqAccess<'de> for BufferedFieldSe
                 // The remaining depth budget must be carried over into the
                 // sub-deserializer, otherwise nested structs would each start
                 // with a fresh budget and the limit could not be enforced.
-                let mut deser =
-                    Deserializer::<&[u8], WITH_IDENTS>::with_depth_limit(raw.as_slice(), self.remaining_depth);
+                let mut deser = Deserializer::<&[u8], WITH_IDENTS>::for_field_value(
+                    raw.as_slice(),
+                    raw.len(),
+                    self.remaining_depth,
+                    self.size_hints,
+                );
                 let value = DeserializeSeed::deserialize(seed, &mut deser)?;
                 return Ok(Some(value));
             }
@@ -497,14 +602,36 @@ impl<'de, R: Read, const WITH_IDENTS: bool> de::Deserializer<'de> for &mut Deser
     where
         V: Visitor<'de>,
     {
-        let sz = self.read_varint_usize()?;
-        if sz > 4 {
-            return Err(Error::BadChar);
-        }
-        let bytes = self.input.read(sz)?;
+        // A field that was a char may since have become a string. A reader
+        // still expecting a char takes its first character rather than
+        // failing, in the same spirit as skipping a field it does not know:
+        // a peer that has not been updated stays able to read the message.
+        let character = if self.takes_block() {
+            if self.input.block_exhausted()? {
+                return Err(Error::BadChar);
+            }
 
-        let character =
-            str::from_utf8(&bytes).map_err(|_| Error::BadChar)?.chars().next().ok_or(Error::BadChar)?;
+            // Only the character itself is read. Anything after it is left to
+            // be skipped when the block ends, so a field widened to a long
+            // string costs a reader that only wants the first character
+            // nothing to ignore.
+            let lead = self.input.read_u8()?;
+            let following = utf8_following_bytes(lead).ok_or(Error::BadChar)?;
+
+            let mut buf = [lead, 0, 0, 0];
+            for byte in buf[1..=following].iter_mut() {
+                *byte = self.input.read_u8()?;
+            }
+
+            first_char(&buf[..=following])?
+        } else {
+            // Here the length belongs to the value rather than to a block, so
+            // all of it has to be consumed to leave the reader in the right
+            // place, however much of it is wanted.
+            let sz = self.read_varint_usize()?;
+            first_char(&self.input.read(sz)?)?
+        };
+
         visitor.visit_char(character)
     }
 
@@ -519,8 +646,7 @@ impl<'de, R: Read, const WITH_IDENTS: bool> de::Deserializer<'de> for &mut Deser
     where
         V: Visitor<'de>,
     {
-        let sz = self.read_varint_usize()?;
-        let bytes = self.input.read(sz)?;
+        let bytes = self.read_len_prefixed()?;
         let str_sl = String::from_utf8(bytes).map_err(|_| Error::BadString)?;
 
         visitor.visit_string(str_sl)
@@ -537,8 +663,7 @@ impl<'de, R: Read, const WITH_IDENTS: bool> de::Deserializer<'de> for &mut Deser
     where
         V: Visitor<'de>,
     {
-        let sz = self.read_varint_usize()?;
-        let bytes = self.input.read(sz)?;
+        let bytes = self.read_len_prefixed()?;
         visitor.visit_byte_buf(bytes)
     }
 
@@ -546,9 +671,12 @@ impl<'de, R: Read, const WITH_IDENTS: bool> de::Deserializer<'de> for &mut Deser
     where
         V: Visitor<'de>,
     {
+        // Mirrors `serialize_some`: the tag comes first and the value still
+        // reaches the end of the block.
+        let owns_block = self.takes_block();
         match self.input.read_u8()? {
             NONE => visitor.visit_none(),
-            SOME => self.recurse(|de| visitor.visit_some(de)),
+            SOME => self.recurse(owns_block, |de| visitor.visit_some(de)),
             _ => Err(Error::BadOption),
         }
     }
@@ -571,7 +699,10 @@ impl<'de, R: Read, const WITH_IDENTS: bool> de::Deserializer<'de> for &mut Deser
     where
         V: Visitor<'de>,
     {
-        self.recurse(|de| visitor.visit_newtype_struct(de))
+        // Mirrors `serialize_newtype_struct`: nothing of its own is written,
+        // so the value keeps the whole block.
+        let owns_block = self.takes_block();
+        self.recurse(owns_block, |de| visitor.visit_newtype_struct(de))
     }
 
     fn deserialize_seq<V>(self, visitor: V) -> Result<V::Value>
@@ -590,7 +721,7 @@ impl<'de, R: Read, const WITH_IDENTS: bool> de::Deserializer<'de> for &mut Deser
             len => Some(len),
         };
 
-        let value = self.recurse(|de| visitor.visit_seq(SeqAccess { deserializer: de, len }))?;
+        let value = self.recurse(false, |de| visitor.visit_seq(SeqAccess { deserializer: de, len }))?;
 
         if len.is_none() {
             self.input.end_skippable()?;
@@ -603,7 +734,7 @@ impl<'de, R: Read, const WITH_IDENTS: bool> de::Deserializer<'de> for &mut Deser
     where
         V: Visitor<'de>,
     {
-        self.recurse(|de| visitor.visit_seq(SeqAccess { deserializer: de, len: Some(len) }))
+        self.recurse(false, |de| visitor.visit_seq(SeqAccess { deserializer: de, len: Some(len) }))
     }
 
     fn deserialize_tuple_struct<V>(self, _name: &'static str, len: usize, visitor: V) -> Result<V::Value>
@@ -629,7 +760,7 @@ impl<'de, R: Read, const WITH_IDENTS: bool> de::Deserializer<'de> for &mut Deser
             len => Some(len),
         };
 
-        let value = self.recurse(|de| visitor.visit_map(MapAccess { deserializer: de, len }))?;
+        let value = self.recurse(false, |de| visitor.visit_map(MapAccess { deserializer: de, len }))?;
 
         if len.is_none() {
             self.input.end_skippable()?;
@@ -644,7 +775,10 @@ impl<'de, R: Read, const WITH_IDENTS: bool> de::Deserializer<'de> for &mut Deser
     where
         V: Visitor<'de>,
     {
-        let len = self.read_varint_usize()?;
+        // A struct filling a field's block leaves out its field count, since
+        // the block says where the fields end. Never in `Slim`, whose fields
+        // carry no identifier and may be empty.
+        let len = if self.takes_block() { None } else { Some(self.read_varint_usize()?) };
 
         if WITH_IDENTS {
             if cfg!(postbag_fast_compile) {
@@ -652,18 +786,19 @@ impl<'de, R: Read, const WITH_IDENTS: bool> de::Deserializer<'de> for &mut Deser
                 // the expected field declaration order, then use `visit_seq`.
                 // Produces significantly less monomorphized code at the cost of
                 // buffering the entire struct payload in memory.
-                self.recurse(|de| {
+                self.recurse(false, |de| {
                     let access = BufferedFieldSeqAccess::<WITH_IDENTS>::new(de, fields, len)?;
                     visitor.visit_seq(access)
                 })
             } else {
                 // Streaming path (default): read field identifiers and values
                 // directly from the wire using `visit_map` with skippable blocks.
-                self.recurse(|de| visitor.visit_map(StructFieldAccess { deserializer: de, len }))
+                self.recurse(false, |de| visitor.visit_map(StructFieldAccess { deserializer: de, len }))
             }
         } else {
+            let len = len.expect("slim structs always state their field count");
             self.input.start_skippable();
-            let value = self.recurse(|de| visitor.visit_seq(StructSeqAccess { deserializer: de, len }))?;
+            let value = self.recurse(false, |de| visitor.visit_seq(StructSeqAccess { deserializer: de, len }))?;
             self.input.end_skippable()?;
             Ok(value)
         }
@@ -675,14 +810,21 @@ impl<'de, R: Read, const WITH_IDENTS: bool> de::Deserializer<'de> for &mut Deser
     where
         V: Visitor<'de>,
     {
-        self.recurse(|de| visitor.visit_enum(de))
+        // The variant identifier comes first and its payload still reaches
+        // the end of the block, mirroring `serialize_newtype_variant` and
+        // `serialize_struct_variant`.
+        let owns_block = self.takes_block();
+        self.recurse(owns_block, |de| visitor.visit_enum(de))
     }
 
     fn deserialize_identifier<V>(self, visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
-        visitor.visit_string(self.read_identifier()?)
+        match self.read_identifier()? {
+            Cow::Borrowed(ident) => visitor.visit_str(ident),
+            Cow::Owned(ident) => visitor.visit_string(ident),
+        }
     }
 
     fn deserialize_ignored_any<V>(self, visitor: V) -> Result<V::Value>
@@ -727,7 +869,7 @@ impl<'de, R: Read, const WITH_IDENTS: bool> serde::de::EnumAccess<'de>
     fn variant_seed<V: DeserializeSeed<'de>>(self, seed: V) -> Result<(V::Value, Self)> {
         let v = if WITH_IDENTS {
             let ident = self.read_identifier()?;
-            let deserializer: StringDeserializer<Error> = ident.into_deserializer();
+            let deserializer: StrDeserializer<Error> = ident.as_ref().into_deserializer();
             DeserializeSeed::deserialize(seed, deserializer)?
         } else {
             let varint = self.read_varint_u32()?;

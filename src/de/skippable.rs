@@ -7,18 +7,35 @@ use crate::{
     varint::{max_of_last_byte, varint_max},
 };
 
+/// How much is allocated up front for a read whose length the input claims
+/// but has not yet delivered.
+const READ_CHUNK: usize = 64 * 1024;
+
 /// Reader that allows blocks to be (partially) skipped.
 pub struct SkipRead<R>(SkipStack<R>);
 
 impl<R: Read> SkipRead<R> {
     /// Creates a new skip stack.
+    /// A reader over the bytes of exactly one value.
+    ///
+    /// The bytes are presented as an already-open block of that length, so a
+    /// value reaching the end of its block is bounded by them and cannot read
+    /// beyond.
+    pub fn new_value(inner: R, len: usize) -> Self {
+        Self(SkipStack::SkipBlock(SkipBlock::exact(SkipStack::Base(inner), len)))
+    }
+
     pub fn new(inner: R) -> Self {
         SkipRead(SkipStack::Base(inner))
     }
 
     /// Read one byte.
+    ///
+    /// Most of what is read is single bytes — every byte of every varint,
+    /// every tag, every block length — so this must not go through the
+    /// buffer-returning path and allocate for each one.
     pub fn read_u8(&mut self) -> Result<u8> {
-        Ok(self.read(1)?[0])
+        self.0.read_byte()
     }
 
     /// Read `cnt` bytes.
@@ -61,6 +78,30 @@ impl<R: Read> SkipRead<R> {
         self.end_skippable()?;
         Ok(data)
     }
+
+    /// Whether the innermost open skippable block has no bytes left.
+    ///
+    /// Used to find the end of a run of values that reaches the end of the
+    /// block, in place of a count written before it.
+    pub fn block_exhausted(&mut self) -> Result<bool> {
+        match &mut self.0 {
+            SkipStack::SkipBlock(sb) => sb.exhausted(),
+            SkipStack::Base(_) | SkipStack::Dummy => unreachable!("no block to be at the end of"),
+        }
+    }
+
+    /// Reads the remainder of the innermost open skippable block.
+    ///
+    /// Only ever called for a value that reaches the end of its block, which
+    /// is why there is always a block open: the reader would otherwise have
+    /// no boundary to read up to, and reading the rest of the input instead
+    /// would swallow whatever follows the value.
+    pub fn read_rest(&mut self) -> Result<Vec<u8>> {
+        match &mut self.0 {
+            SkipStack::SkipBlock(sb) => sb.read_all(),
+            SkipStack::Base(_) | SkipStack::Dummy => unreachable!("no block to read to the end of"),
+        }
+    }
 }
 
 enum SkipStack<R> {
@@ -73,8 +114,13 @@ impl<R: Read> SkipStack<R> {
     pub fn read(&mut self, ct: usize) -> Result<Vec<u8>> {
         match self {
             Self::Base(base) => {
-                let mut buf = vec![0; ct];
-                base.read_exact(&mut buf)?;
+                let mut buf = Vec::new();
+                while buf.len() < ct {
+                    let chunk = (ct - buf.len()).min(READ_CHUNK);
+                    let start = buf.len();
+                    buf.resize(start + chunk, 0);
+                    base.read_exact(&mut buf[start..])?;
+                }
                 Ok(buf)
             }
             Self::SkipBlock(sb) => sb.read(ct),
@@ -82,10 +128,22 @@ impl<R: Read> SkipStack<R> {
         }
     }
 
+    fn read_byte(&mut self) -> Result<u8> {
+        match self {
+            Self::Base(base) => {
+                let mut buf = [0u8; 1];
+                base.read_exact(&mut buf)?;
+                Ok(buf[0])
+            }
+            Self::SkipBlock(sb) => sb.read_byte(),
+            Self::Dummy => unreachable!(),
+        }
+    }
+
     fn try_take_varint_u16(&mut self) -> Result<u16> {
         let mut out = 0;
         for i in 0..varint_max::<u16>() {
-            let val = self.read(1)?[0];
+            let val = self.read_byte()?;
             let carry = (val & 0x7F) as u16;
             out |= carry << (7 * i);
 
@@ -122,6 +180,12 @@ impl<R: Read> SkipBlock<R> {
         Self { inner: Box::new(inner), remaining: 0, has_next_block: true }
     }
 
+    /// A block of known length whose bytes are already there, rather than one
+    /// that reads its length and continuations from the input.
+    fn exact(inner: SkipStack<R>, len: usize) -> Self {
+        Self { inner: Box::new(inner), remaining: len, has_next_block: false }
+    }
+
     fn update_remaining(&mut self) -> Result<()> {
         if self.remaining > 0 || !self.has_next_block {
             return Ok(());
@@ -133,6 +197,19 @@ impl<R: Read> SkipBlock<R> {
         Ok(())
     }
 
+    fn read_byte(&mut self) -> Result<u8> {
+        self.update_remaining()?;
+
+        if self.remaining == 0 {
+            return Err(Error::EndOfBlock);
+        }
+
+        let byte = self.inner.read_byte()?;
+        self.remaining -= 1;
+
+        Ok(byte)
+    }
+
     fn read(&mut self, mut ct: usize) -> Result<Vec<u8>> {
         self.update_remaining()?;
 
@@ -142,7 +219,7 @@ impl<R: Read> SkipBlock<R> {
             return Ok(buf);
         }
 
-        let mut buf = Vec::with_capacity(ct);
+        let mut buf = Vec::with_capacity(ct.min(READ_CHUNK));
         while ct > 0 {
             self.update_remaining()?;
 
@@ -172,6 +249,13 @@ impl<R: Read> SkipBlock<R> {
         }
 
         Ok(*self.inner)
+    }
+
+    /// Whether the block has no bytes left, following it into a continuation
+    /// block if there is one.
+    fn exhausted(&mut self) -> Result<bool> {
+        self.update_remaining()?;
+        Ok(self.remaining == 0)
     }
 
     fn read_all(&mut self) -> Result<Vec<u8>> {
