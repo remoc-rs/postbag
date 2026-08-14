@@ -13,42 +13,63 @@ use std::fmt;
 /// Use [`Cfg::with_depth_limit`] to specify a different limit.
 pub const DEFAULT_DEPTH_LIMIT: usize = 128;
 
-/// Which lengths a value writes for itself in [`Full`] mode.
+/// Version of the data format.
 ///
-/// This is part of the data format and the serializer and deserializer must
-/// use the same setting.
-///
-/// This is ignored for [`Slim`].
+/// Both serializer and deserializer must use the same version.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
 #[non_exhaustive]
-pub enum SizeHints {
-    /// Every value writes its own length, even when it can be deduced from the
-    /// enclosing block.
+pub enum Version {
+    /// The format of Postbag 0.4 and earlier.
     ///
-    /// Use this to read data written by Postbag 0.4 and earlier.
-    All,
-    /// Sequences and maps write their element count; nothing else writes a
-    /// length or count that can be deduced from the enclosing block.
-    ///
-    /// The count of a sequence or map is not deducible: an element or entry
-    /// can occupy no bytes at all, so any number of them looks the same as
-    /// none. It is also what lets the reader allocate once.
-    ///
-    /// This saves some space versus [All](Self::All) but is incompatible with
-    /// Postbag 0.4 and earlier.
+    /// Only use for backwards compatibility.
+    Postbag0_4,
+    /// The format of Postbag 1.0.
     ///
     /// This is the default.
     #[default]
-    Sequences,
+    Postbag1,
 }
 
-impl SizeHints {
-    /// Whether a value that extends to the end of its block writes its own
-    /// length as well.
-    pub(crate) const fn value_writes_len(self) -> bool {
-        matches!(self, Self::All)
+impl Version {
+    /// Whether this is the format of Postbag 0.4 and earlier.
+    pub(crate) const fn is_0_4(self) -> bool {
+        matches!(self, Self::Postbag0_4)
     }
 }
+
+/// Identifies the version by a byte.
+impl From<Version> for u8 {
+    fn from(version: Version) -> Self {
+        match version {
+            Version::Postbag0_4 => 0,
+            Version::Postbag1 => 1,
+        }
+    }
+}
+
+impl TryFrom<u8> for Version {
+    type Error = UnknownVersion;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Postbag0_4),
+            1 => Ok(Self::Postbag1),
+            unknown => Err(UnknownVersion(unknown)),
+        }
+    }
+}
+
+/// A byte that identifies no [`Version`] this build knows.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct UnknownVersion(pub u8);
+
+impl fmt::Display for UnknownVersion {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "unknown Postbag data format version {}", self.0)
+    }
+}
+
+impl std::error::Error for UnknownVersion {}
 
 /// Configuration.
 ///
@@ -67,7 +88,7 @@ impl SizeHints {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Cfg<const WITH_IDENTS: bool> {
     depth_limit: usize,
-    size_hints: SizeHints,
+    version: Version,
 }
 
 impl<const WITH_IDENTS: bool> Cfg<WITH_IDENTS> {
@@ -78,7 +99,7 @@ impl<const WITH_IDENTS: bool> Cfg<WITH_IDENTS> {
 
     /// Creates a new configuration using default values.
     pub const fn new() -> Self {
-        Self { depth_limit: DEFAULT_DEPTH_LIMIT, size_hints: SizeHints::Sequences }
+        Self { depth_limit: DEFAULT_DEPTH_LIMIT, version: Version::Postbag1 }
     }
 
     /// Whether struct field identifiers and enum variant identifiers
@@ -106,24 +127,22 @@ impl<const WITH_IDENTS: bool> Cfg<WITH_IDENTS> {
         Self { depth_limit, ..self }
     }
 
-    /// Sets which lengths a value writes for itself.
+    /// Sets the version of the data format.
     ///
-    /// This is part of the data format: both ends must agree, or the reader
-    /// misinterprets the bytes. Use [`SizeHints::All`] to read data written
-    /// by Postbag 0.4 and earlier.
+    /// Both ends must use the same version.
     ///
-    /// Defaults to [`SizeHints::Sequences`].
+    /// Defaults to [`Version::Postbag1`].
     ///
     /// # Example
     ///
     /// ```rust
-    /// use postbag::cfg::{Full, SizeHints};
+    /// use postbag::cfg::{Full, Version};
     ///
-    /// let cfg = Full::new().with_size_hints(SizeHints::All);
-    /// assert_eq!(cfg.size_hints(), SizeHints::All);
+    /// let cfg = Full::new().with_version(Version::Postbag0_4);
+    /// assert_eq!(cfg.version(), Version::Postbag0_4);
     /// ```
-    pub const fn with_size_hints(self, size_hints: SizeHints) -> Self {
-        Self { size_hints, ..self }
+    pub const fn with_version(self, version: Version) -> Self {
+        Self { version, ..self }
     }
 
     /// The limit for the nesting depth of serialized and deserialized data.
@@ -131,9 +150,9 @@ impl<const WITH_IDENTS: bool> Cfg<WITH_IDENTS> {
         self.depth_limit
     }
 
-    /// Which lengths a value writes for itself.
-    pub const fn size_hints(&self) -> SizeHints {
-        self.size_hints
+    /// The version of the data format.
+    pub const fn version(&self) -> Version {
+        self.version
     }
 }
 
@@ -148,7 +167,7 @@ impl<const WITH_IDENTS: bool> fmt::Debug for Cfg<WITH_IDENTS> {
         f.debug_struct("Cfg")
             .field("with_idents", &WITH_IDENTS)
             .field("depth_limit", &self.depth_limit)
-            .field("size_hints", &self.size_hints)
+            .field("version", &self.version)
             .finish()
     }
 }

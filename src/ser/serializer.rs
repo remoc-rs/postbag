@@ -3,8 +3,8 @@ use std::io::Write;
 use serde::{Serialize, ser};
 
 use crate::{
-    FALSE, NONE, SOME, SPECIAL_LEN, TRUE, UNKNOWN_LEN,
-    cfg::{Cfg, SizeHints},
+    FALSE, MORE, NO_MORE, NONE, SOME, SPECIAL_LEN, TRUE, UNKNOWN_LEN,
+    cfg::{Cfg, Version},
     error::{Error, Result},
     id::{ID_LEN, ID_LEN_NAME, ident_number},
     ser::skippable::SkipWrite,
@@ -15,7 +15,7 @@ use crate::{
 pub struct Serializer<W, const WITH_IDENTS: bool> {
     output: SkipWrite<W>,
     remaining_depth: usize,
-    size_hints: SizeHints,
+    version: Version,
     /// Whether the value about to be serialized reaches the end of the
     /// enclosing skippable block, so that it need not state its own length.
     ///
@@ -33,7 +33,7 @@ impl<W: Write, const WITH_IDENTS: bool> Serializer<W, WITH_IDENTS> {
         Self {
             output: SkipWrite::new(write),
             remaining_depth: cfg.depth_limit(),
-            size_hints: cfg.size_hints(),
+            version: cfg.version(),
             owns_block: false,
         }
     }
@@ -73,7 +73,7 @@ impl<W: Write, const WITH_IDENTS: bool> Serializer<W, WITH_IDENTS> {
     /// Only in the `Full` configuration, which is the only one that wraps
     /// field values in a block that states where they end.
     fn field_owns_block(&self) -> bool {
-        WITH_IDENTS && !self.size_hints.value_writes_len()
+        WITH_IDENTS && !self.version.is_0_4()
     }
 
     /// Get the writer.
@@ -410,11 +410,18 @@ where
     where
         T: ?Sized + Serialize,
     {
+        if self.len.is_none() && !self.serializer.version.is_0_4() {
+            self.serializer.output.write(&[MORE])?;
+        }
+
         self.serializer.recurse(false, |ser| value.serialize(ser))
     }
 
     fn end(self) -> Result<()> {
         if self.len.is_none() {
+            if !self.serializer.version.is_0_4() {
+                self.serializer.output.write(&[NO_MORE])?;
+            }
             self.serializer.output.end_skippable()?;
         }
 
@@ -499,6 +506,10 @@ where
     where
         T: ?Sized + Serialize,
     {
+        if self.len.is_none() && !self.serializer.version.is_0_4() {
+            self.serializer.output.write(&[MORE])?;
+        }
+
         self.serializer.recurse(false, |ser| key.serialize(ser))
     }
 
@@ -512,6 +523,9 @@ where
 
     fn end(self) -> Result<()> {
         if self.len.is_none() {
+            if !self.serializer.version.is_0_4() {
+                self.serializer.output.write(&[NO_MORE])?;
+            }
             self.serializer.output.end_skippable()?;
         }
 

@@ -1,18 +1,19 @@
-//! Which lengths a value writes for itself.
+//! What each version of the data format writes.
 //!
 //! In the `Full` configuration a field value sits in a skippable block that
-//! states its length. A value reaching the end of that block need not state
-//! its length again, and [`SizeHints`] selects whether it does.
+//! states its length, so a value reaching the end of that block need not
+//! state its length again. Postbag 1.0 stopped doing so; `Version::Postbag0_4`
+//! still does.
 //!
 //! The byte-level tests are what keeps the two sides in step: writer and
-//! reader must arm the flag at exactly the same places, and only a test on
-//! the bytes notices when one of them stops doing so.
+//! reader must leave the same things out in the same places, and only a test
+//! on the bytes notices when one of them stops doing so.
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{collections::BTreeMap, fmt::Debug};
 
 use postbag::{
-    cfg::{Full, SizeHints, Slim},
+    cfg::{Full, Slim, Version},
     deserialize, serialize,
 };
 
@@ -30,8 +31,8 @@ impl<T> One<T> {
     }
 }
 
-/// Serializes and deserializes under both settings, checking that the value
-/// survives each, and returns the bytes written with `Sequences` and `All`.
+/// Serializes and deserializes under both versions, checking that the value
+/// survives each, and returns the bytes each one wrote.
 #[track_caller]
 fn both<T>(value: &T) -> (Vec<u8>, Vec<u8>)
 where
@@ -39,13 +40,13 @@ where
 {
     let mut written = Vec::new();
 
-    for hints in [SizeHints::Sequences, SizeHints::All] {
-        let cfg = Full::new().with_size_hints(hints);
+    for version in [Version::Postbag1, Version::Postbag0_4] {
+        let cfg = Full::new().with_version(version);
 
         let mut bytes = Vec::new();
         serialize(cfg, &mut bytes, value).expect("serialization failed");
         let back: T = deserialize(cfg, bytes.as_slice()).expect("deserialization failed");
-        assert_eq!(back, *value, "value did not survive {hints:?}");
+        assert_eq!(back, *value, "value did not survive {version:?}");
 
         written.push(bytes);
     }
@@ -53,55 +54,55 @@ where
     (written.remove(0), written.remove(0))
 }
 
-/// Asserts that both settings write the same bytes, which is the case for
+/// Asserts that both versions write the same bytes, which is the case for
 /// every value that does not reach the end of a block of its own.
 #[track_caller]
 fn unaffected<T>(value: &T)
 where
     T: Serialize + DeserializeOwned + Debug + PartialEq,
 {
-    let (seq, all) = both(value);
-    assert_eq!(seq, all, "the setting changed the bytes of a value it should not reach");
+    let (v1, v0_4) = both(value);
+    assert_eq!(v1, v0_4, "the version changed the bytes of a value it should not reach");
 }
 
 // --------------------------------------------------------------------------
-// What the setting changes
+// What 1.0 changed
 // --------------------------------------------------------------------------
 
 #[test]
 fn string_field() {
-    let (seq, all) = both(&One::new("temp".to_string()));
+    let (v1, v0_4) = both(&One::new("temp".to_string()));
 
     // count, identifier `_0`, block length, the four bytes.
-    assert_eq!(seq, b"\x01\x41\x04temp");
+    assert_eq!(v1, b"\x01\x41\x04temp");
     // What Postbag 0.4 wrote: the block says five, the string says four.
-    assert_eq!(all, b"\x01\x41\x05\x04temp");
+    assert_eq!(v0_4, b"\x01\x41\x05\x04temp");
 }
 
 #[test]
 fn empty_string_field() {
-    let (seq, all) = both(&One::new(String::new()));
+    let (v1, v0_4) = both(&One::new(String::new()));
 
-    assert_eq!(seq, b"\x01\x41\x00");
-    assert_eq!(all, b"\x01\x41\x01\x00");
+    assert_eq!(v1, b"\x01\x41\x00");
+    assert_eq!(v0_4, b"\x01\x41\x01\x00");
 }
 
 #[test]
 fn string_length_is_bytes_not_chars() {
     // Two characters, three bytes: the block length is the byte length, which
     // is the only length a string needs.
-    let (seq, all) = both(&One::new("°C".to_string()));
+    let (v1, v0_4) = both(&One::new("°C".to_string()));
 
-    assert_eq!(seq, b"\x01\x41\x03\xc2\xb0C");
-    assert_eq!(all, b"\x01\x41\x04\x03\xc2\xb0C");
+    assert_eq!(v1, b"\x01\x41\x03\xc2\xb0C");
+    assert_eq!(v0_4, b"\x01\x41\x04\x03\xc2\xb0C");
 }
 
 #[test]
 fn bytes_field() {
-    let (seq, all) = both(&One::new(serde_bytes::ByteBuf::from(vec![1u8, 2, 3])));
+    let (v1, v0_4) = both(&One::new(serde_bytes::ByteBuf::from(vec![1u8, 2, 3])));
 
-    assert_eq!(seq, b"\x01\x41\x03\x01\x02\x03");
-    assert_eq!(all, b"\x01\x41\x04\x03\x01\x02\x03");
+    assert_eq!(v1, b"\x01\x41\x03\x01\x02\x03");
+    assert_eq!(v0_4, b"\x01\x41\x04\x03\x01\x02\x03");
 }
 
 #[test]
@@ -109,19 +110,19 @@ fn char_field() {
     // A char is written through the same path as a string, so it loses its
     // length in the same case — and the reader parses it separately, which is
     // exactly where the two sides could drift apart.
-    let (seq, all) = both(&One::new('°'));
+    let (v1, v0_4) = both(&One::new('°'));
 
-    assert_eq!(seq, b"\x01\x41\x02\xc2\xb0");
-    assert_eq!(all, b"\x01\x41\x03\x02\xc2\xb0");
+    assert_eq!(v1, b"\x01\x41\x02\xc2\xb0");
+    assert_eq!(v0_4, b"\x01\x41\x03\x02\xc2\xb0");
 }
 
 #[test]
 fn option_passes_it_on() {
     // `Some` writes its tag and then the value, which still ends the block.
-    let (seq, all) = both(&One::new(Some("hi".to_string())));
+    let (v1, v0_4) = both(&One::new(Some("hi".to_string())));
 
-    assert_eq!(seq, b"\x01\x41\x03\x01hi");
-    assert_eq!(all, b"\x01\x41\x04\x01\x02hi");
+    assert_eq!(v1, b"\x01\x41\x03\x01hi");
+    assert_eq!(v0_4, b"\x01\x41\x04\x01\x02hi");
 
     // Nothing follows a `None`, so there is nothing to shorten.
     unaffected(&One::new(Option::<String>::None));
@@ -129,15 +130,15 @@ fn option_passes_it_on() {
 
 #[test]
 fn nested_option_passes_it_on() {
-    let (seq, all) = both(&One::new(Some(Some("hi".to_string()))));
+    let (v1, v0_4) = both(&One::new(Some(Some("hi".to_string()))));
 
-    assert_eq!(seq, b"\x01\x41\x04\x01\x01hi");
-    assert_eq!(all, b"\x01\x41\x05\x01\x01\x02hi");
+    assert_eq!(v1, b"\x01\x41\x04\x01\x01hi");
+    assert_eq!(v0_4, b"\x01\x41\x05\x01\x01\x02hi");
 
     // `Some(None)` stays distinct from `None` under both settings.
-    let (seq, all) = both(&One::new(Some(Option::<String>::None)));
-    assert_eq!(seq, b"\x01\x41\x02\x01\x00");
-    assert_eq!(all, seq);
+    let (v1, v0_4) = both(&One::new(Some(Option::<String>::None)));
+    assert_eq!(v1, b"\x01\x41\x02\x01\x00");
+    assert_eq!(v0_4, v1);
 }
 
 #[test]
@@ -146,10 +147,10 @@ fn newtype_struct_passes_it_on() {
     struct Name(String);
 
     // A newtype struct writes nothing of its own.
-    let (seq, all) = both(&One::new(Name("hi".to_string())));
+    let (v1, v0_4) = both(&One::new(Name("hi".to_string())));
 
-    assert_eq!(seq, b"\x01\x41\x02hi");
-    assert_eq!(all, b"\x01\x41\x03\x02hi");
+    assert_eq!(v1, b"\x01\x41\x02hi");
+    assert_eq!(v0_4, b"\x01\x41\x03\x02hi");
 }
 
 #[test]
@@ -163,18 +164,18 @@ fn a_nested_struct_leaves_out_its_field_count() {
     // Two savings: the inner struct's field count, because the block says
     // where its fields end, and the inner string's length, because its own
     // block says where it ends.
-    let (seq, all) = both(&One::new(Inner { text: "hi".to_string() }));
+    let (v1, v0_4) = both(&One::new(Inner { text: "hi".to_string() }));
 
-    assert_eq!(seq, b"\x01\x41\x04\x41\x02hi");
-    assert_eq!(all, b"\x01\x41\x06\x01\x41\x03\x02hi");
+    assert_eq!(v1, b"\x01\x41\x04\x41\x02hi");
+    assert_eq!(v0_4, b"\x01\x41\x06\x01\x41\x03\x02hi");
 }
 
 #[test]
 fn a_top_level_struct_keeps_its_field_count() {
     // Nothing delimits it, so the count is the only thing that does.
-    let mut seq = Vec::new();
-    serialize(Full::new(), &mut seq, &One::new(7u8)).unwrap();
-    assert_eq!(seq, b"\x01\x41\x01\x07");
+    let mut bytes = Vec::new();
+    serialize(Full::new(), &mut bytes, &One::new(7u8)).unwrap();
+    assert_eq!(bytes, b"\x01\x41\x01\x07");
 }
 
 #[test]
@@ -186,28 +187,28 @@ fn a_struct_in_a_sequence_keeps_its_field_count() {
     }
 
     // An element does not end its block, so it says how many fields it has.
-    let (seq, all) = both(&One::new(vec![Inner { n: 7 }, Inner { n: 8 }]));
+    let (v1, v0_4) = both(&One::new(vec![Inner { n: 7 }, Inner { n: 8 }]));
 
-    assert_eq!(seq, b"\x01\x41\x09\x02\x01\x41\x01\x07\x01\x41\x01\x08");
-    assert_eq!(all, seq);
+    assert_eq!(v1, b"\x01\x41\x09\x02\x01\x41\x01\x07\x01\x41\x01\x08");
+    assert_eq!(v0_4, v1);
 }
 
 // --------------------------------------------------------------------------
-// What it leaves alone
+// What it left alone
 // --------------------------------------------------------------------------
 
 #[test]
 fn a_sequence_keeps_its_count() {
     // The count is not the byte length: it cannot be recovered from one, and
     // it is what lets the reader allocate once.
-    let (seq, all) = both(&One::new(vec!["a".to_string(), "bb".to_string()]));
+    let (v1, v0_4) = both(&One::new(vec!["a".to_string(), "bb".to_string()]));
 
-    assert_eq!(seq, b"\x01\x41\x06\x02\x01a\x02bb");
-    assert_eq!(all, seq);
+    assert_eq!(v1, b"\x01\x41\x06\x02\x01a\x02bb");
+    assert_eq!(v0_4, v1);
 
     // An element that occupies no bytes at all is why the count has to stay.
-    let (seq, _) = both(&One::new(vec![(), (), ()]));
-    assert_eq!(seq, b"\x01\x41\x01\x03");
+    let (v1, _) = both(&One::new(vec![(), (), ()]));
+    assert_eq!(v1, b"\x01\x41\x01\x03");
 }
 
 #[test]
@@ -216,13 +217,13 @@ fn a_map_keeps_its_count() {
     // reach it: an entry of a `BTreeMap<(), ()>` occupies no bytes, so the
     // count is the whole content of the block and an empty map would be
     // indistinguishable from one holding an entry.
-    let (seq, all) = both(&One::new(BTreeMap::<(), ()>::new()));
-    assert_eq!(seq, b"\x01\x41\x01\x00");
-    assert_eq!(all, seq);
+    let (v1, v0_4) = both(&One::new(BTreeMap::<(), ()>::new()));
+    assert_eq!(v1, b"\x01\x41\x01\x00");
+    assert_eq!(v0_4, v1);
 
-    let (seq, all) = both(&One::new(BTreeMap::from([((), ())])));
-    assert_eq!(seq, b"\x01\x41\x01\x01");
-    assert_eq!(all, seq);
+    let (v1, v0_4) = both(&One::new(BTreeMap::from([((), ())])));
+    assert_eq!(v1, b"\x01\x41\x01\x01");
+    assert_eq!(v0_4, v1);
 }
 
 #[test]
@@ -256,26 +257,26 @@ fn an_enum_variant_passes_it_on() {
         },
     }
 
-    let (seq, all) = both(&One::new(Unit::Other("K".to_string())));
-    assert_eq!(seq, b"\x01\x41\x02\x42K");
-    assert_eq!(all, b"\x01\x41\x03\x42\x01K");
+    let (v1, v0_4) = both(&One::new(Unit::Other("K".to_string())));
+    assert_eq!(v1, b"\x01\x41\x02\x42K");
+    assert_eq!(v0_4, b"\x01\x41\x03\x42\x01K");
 
-    let (seq, all) = both(&One::new(Unit::Scaled { by: 7 }));
-    assert_eq!(seq, b"\x01\x41\x04\x43\x41\x01\x07");
-    assert_eq!(all, b"\x01\x41\x05\x43\x01\x41\x01\x07");
+    let (v1, v0_4) = both(&One::new(Unit::Scaled { by: 7 }));
+    assert_eq!(v1, b"\x01\x41\x04\x43\x41\x01\x07");
+    assert_eq!(v0_4, b"\x01\x41\x05\x43\x01\x41\x01\x07");
 
     // A unit variant has no payload to shorten.
-    let (seq, all) = both(&One::new(Unit::Celsius));
-    assert_eq!(seq, b"\x01\x41\x01\x41");
-    assert_eq!(all, seq);
+    let (v1, v0_4) = both(&One::new(Unit::Celsius));
+    assert_eq!(v1, b"\x01\x41\x01\x41");
+    assert_eq!(v0_4, v1);
 }
 
 #[test]
 fn a_value_of_its_own_keeps_its_length() {
     // Nothing encloses a top-level value, so it has to state its own length.
-    let mut seq = Vec::new();
-    serialize(Full::new(), &mut seq, &"temp".to_string()).unwrap();
-    assert_eq!(seq, b"\x04temp");
+    let mut bytes = Vec::new();
+    serialize(Full::new(), &mut bytes, &"temp".to_string()).unwrap();
+    assert_eq!(bytes, b"\x04temp");
 
     unaffected(&"temp".to_string());
 }
@@ -321,8 +322,8 @@ fn slim_is_unaffected() {
     let value = Reading { sensor: 300, label: "temp".to_string() };
     let mut written = Vec::new();
 
-    for hints in [SizeHints::Sequences, SizeHints::All] {
-        let cfg = Slim::new().with_size_hints(hints);
+    for version in [Version::Postbag1, Version::Postbag0_4] {
+        let cfg = Slim::new().with_version(version);
         let mut bytes = Vec::new();
         serialize(cfg, &mut bytes, &value).unwrap();
         let back: Reading = deserialize(cfg, bytes.as_slice()).unwrap();
@@ -345,12 +346,12 @@ const MAX_BLOCK: usize = u16::MAX as usize;
 fn a_string_longer_than_a_block() {
     for len in [MAX_BLOCK - 1, MAX_BLOCK, MAX_BLOCK + 1, 2 * MAX_BLOCK, 2 * MAX_BLOCK + 1] {
         let value = One::new("x".repeat(len));
-        let (seq, all) = both(&value);
+        let (v1, v0_4) = both(&value);
 
         // Every full block costs a two-byte length, the last one costs one to
-        // three, and `All` states the string's own length on top of that.
-        assert!(seq.len() > len, "at {len} bytes");
-        assert!(all.len() > seq.len(), "at {len} bytes");
+        // three, and 0.4 states the string's own length on top of that.
+        assert!(v1.len() > len, "at {len} bytes");
+        assert!(v0_4.len() > v1.len(), "at {len} bytes");
     }
 }
 
@@ -377,10 +378,10 @@ fn no_field_is_empty_in_full() {
         c: (),
     }
 
-    let (seq, all) = both(&One::new(Units { a: (), b: 7, c: () }));
+    let (v1, v0_4) = both(&One::new(Units { a: (), b: 7, c: () }));
 
-    assert_eq!(seq, b"\x01\x41\x07\x41\x00\x42\x01\x07\x43\x00");
-    assert_eq!(all, b"\x01\x41\x08\x03\x41\x00\x42\x01\x07\x43\x00");
+    assert_eq!(v1, b"\x01\x41\x07\x41\x00\x42\x01\x07\x43\x00");
+    assert_eq!(v0_4, b"\x01\x41\x08\x03\x41\x00\x42\x01\x07\x43\x00");
 }
 
 #[test]
@@ -398,4 +399,37 @@ fn slim_needs_its_count_because_a_field_can_be_empty() {
 
     assert_eq!(back, Units { a: (), b: () });
     assert_eq!(bytes, b"\x02\x00", "the count is all there is");
+}
+
+// --------------------------------------------------------------------------
+// Naming a version to another program
+// --------------------------------------------------------------------------
+
+#[test]
+fn versions_have_stable_bytes() {
+    // Other programs exchange these to agree on a version, so the values are
+    // part of the interface and may not be renumbered.
+    assert_eq!(u8::from(Version::Postbag0_4), 0);
+    assert_eq!(u8::from(Version::Postbag1), 1);
+
+    assert_eq!(Version::try_from(0u8).unwrap(), Version::Postbag0_4);
+    assert_eq!(Version::try_from(1u8).unwrap(), Version::Postbag1);
+}
+
+#[test]
+fn versions_order_with_their_bytes() {
+    // What lets two programs settle on the lower of the two they name.
+    assert!(Version::Postbag0_4 < Version::Postbag1);
+    assert!(u8::from(Version::Postbag0_4) < u8::from(Version::Postbag1));
+    assert_eq!(Version::Postbag1.min(Version::Postbag0_4), Version::Postbag0_4);
+}
+
+#[test]
+fn an_unknown_byte_names_no_version() {
+    // A program built against a newer Postbag can name one this build has
+    // never heard of.
+    let err = Version::try_from(200u8).unwrap_err();
+
+    assert_eq!(err, postbag::cfg::UnknownVersion(200));
+    assert_eq!(err.to_string(), "unknown Postbag data format version 200");
 }

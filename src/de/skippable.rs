@@ -26,7 +26,7 @@ impl<R: Read> SkipRead<R> {
     }
 
     pub fn new(inner: R) -> Self {
-        SkipRead(SkipStack::Base(inner))
+        Self(SkipStack::Base(inner))
     }
 
     /// Read one byte.

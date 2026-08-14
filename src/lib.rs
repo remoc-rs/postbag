@@ -21,6 +21,9 @@ const TRUE: u8 = 1;
 const NONE: u8 = 0;
 const SOME: u8 = 1;
 
+const MORE: u8 = 1;
+const NO_MORE: u8 = 0;
+
 const SPECIAL_LEN: usize = 125;
 const UNKNOWN_LEN: usize = 0;
 

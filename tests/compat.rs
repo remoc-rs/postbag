@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::fmt::Debug;
 
 use postbag::{
-    cfg::{Cfg, Full, SizeHints, Slim},
+    cfg::{Cfg, Full, Slim, Version},
     deserialize, serialize,
 };
 
@@ -804,7 +804,7 @@ fn changed_fields_of_a_nested_struct() {
 
     let value = OuterA { inner: InnerA { f1: 7, f2: "x".into(), f3: true }, after: 300 };
 
-    for cfg in [Full::new(), Full::new().with_size_hints(SizeHints::All)] {
+    for cfg in [Full::new(), Full::new().with_version(Version::Postbag0_4)] {
         // Fields the reader does not know are skipped, one it never got
         // takes its default, and the field after the struct is still found.
         let b: OuterB = transform(&value, cfg);
@@ -844,7 +844,7 @@ fn restored_fields_of_a_nested_struct() {
 
     let value = Outer { inner: Sent { f2: "x".into() }, after: 300 };
 
-    for cfg in [Full::new(), Full::new().with_size_hints(SizeHints::All)] {
+    for cfg in [Full::new(), Full::new().with_version(Version::Postbag0_4)] {
         let got: Outer<Expected> = transform(&value, cfg);
         assert_eq!(got.inner, Expected { f1: 0, f2: "x".into(), f3: false });
         assert_eq!(got.after, 300);
@@ -872,7 +872,7 @@ fn a_nested_struct_that_loses_all_its_fields() {
         f1: u32,
     }
 
-    for cfg in [Full::new(), Full::new().with_size_hints(SizeHints::All)] {
+    for cfg in [Full::new(), Full::new().with_version(Version::Postbag0_4)] {
         let value = Outer { inner: Empty {}, after: 300 };
         let grown: Outer<Filled> = transform(&value, cfg);
         assert_eq!(grown.inner.f1, 0);
@@ -906,7 +906,7 @@ fn a_char_field_widened_to_a_string() {
         after: u32,
     }
 
-    for cfg in [Full::new(), Full::new().with_size_hints(SizeHints::All)] {
+    for cfg in [Full::new(), Full::new().with_version(Version::Postbag0_4)] {
         // The updated peer reads what the old one sends, exactly.
         let widened: AsString = transform(&AsChar { unit: '°', after: 300 }, cfg);
         assert_eq!(widened, AsString { unit: "°".into(), after: 300 });
@@ -941,7 +941,7 @@ fn a_name_that_looks_numbered_but_is_not() {
 
     let value = Padded { padded: 1, plain: 2 };
 
-    for cfg in [Full::new(), Full::new().with_size_hints(SizeHints::All)] {
+    for cfg in [Full::new(), Full::new().with_version(Version::Postbag0_4)] {
         let bytes = postbag::to_vec(cfg, &value).unwrap();
         let back: Padded = postbag::from_slice(cfg, bytes.as_slice()).unwrap();
 

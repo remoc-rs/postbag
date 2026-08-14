@@ -6,8 +6,8 @@ use serde::de::{
 };
 
 use crate::{
-    FALSE, NONE, SOME, SPECIAL_LEN, TRUE, UNKNOWN_LEN,
-    cfg::{Cfg, SizeHints},
+    FALSE, MORE, NO_MORE, NONE, SOME, SPECIAL_LEN, TRUE, UNKNOWN_LEN,
+    cfg::{Cfg, Version},
     de::skippable::SkipRead,
     error::{Error, Result},
     id::{ID_LEN, ID_LEN_NAME, numbered_ident},
@@ -35,7 +35,7 @@ fn first_char(bytes: &[u8]) -> Result<char> {
 pub struct Deserializer<'de, R, const WITH_IDENTS: bool> {
     input: SkipRead<R>,
     remaining_depth: usize,
-    size_hints: SizeHints,
+    version: Version,
     /// Whether the value about to be deserialized reaches the end of the
     /// enclosing skippable block, so that it did not state its own length.
     ///
@@ -51,15 +51,15 @@ where
 {
     /// Obtain a Deserializer from a reader, using the specified configuration.
     pub fn new(read: R, cfg: Cfg<WITH_IDENTS>) -> Self {
-        Self::with_depth_limit(read, cfg.depth_limit(), cfg.size_hints())
+        Self::with_depth_limit(read, cfg.depth_limit(), cfg.version())
     }
 
     /// Obtain a Deserializer from a reader, using the specified nesting depth limit.
-    fn with_depth_limit(read: R, depth_limit: usize, size_hints: SizeHints) -> Self {
+    fn with_depth_limit(read: R, depth_limit: usize, version: Version) -> Self {
         Deserializer {
             input: SkipRead::new(read),
             remaining_depth: depth_limit,
-            size_hints,
+            version,
             owns_block: false,
             _de: PhantomData,
         }
@@ -70,12 +70,12 @@ where
     /// The value fills them, so it may have left out a length of its own; the
     /// bytes are treated as an open block so that reading to the end of the
     /// value stays bounded by them.
-    fn for_field_value(read: R, len: usize, depth_limit: usize, size_hints: SizeHints) -> Self {
+    fn for_field_value(read: R, len: usize, depth_limit: usize, version: Version) -> Self {
         Deserializer {
             input: SkipRead::new_value(read, len),
             remaining_depth: depth_limit,
-            size_hints,
-            owns_block: WITH_IDENTS && !size_hints.value_writes_len(),
+            version,
+            owns_block: WITH_IDENTS && !version.is_0_4(),
             _de: PhantomData,
         }
     }
@@ -119,7 +119,26 @@ impl<'de, R: Read, const WITH_IDENTS: bool> Deserializer<'de, R, WITH_IDENTS> {
 
     /// Whether a field value left out its own length.
     fn field_owns_block(&self) -> bool {
-        WITH_IDENTS && !self.size_hints.value_writes_len()
+        WITH_IDENTS && !self.version.is_0_4()
+    }
+
+    /// Whether another element of a sequence or map whose length was not
+    /// stated follows.
+    ///
+    /// Under [`Version::Postbag0_4`] this reproduces what 0.4 did, including that
+    /// a sequence whose elements read nothing never reaches an end.
+    fn has_uncounted_element(&mut self) -> Result<bool> {
+        if self.version.is_0_4() {
+            // What 0.4 wrote: no announcements, so the sequence ends wherever
+            // its block does.
+            return Ok(!self.input.block_exhausted()?);
+        }
+
+        match self.input.read_u8()? {
+            NO_MORE => Ok(false),
+            MORE => Ok(true),
+            _ => Err(Error::BadLen),
+        }
     }
 
     /// Reads a run of bytes that states its own length, or, when it reaches
@@ -248,11 +267,13 @@ impl<'a, 'b: 'a, R: Read, const WITH_IDENTS: bool> serde::de::SeqAccess<'b>
                 let data = DeserializeSeed::deserialize(seed, &mut *self.deserializer)?;
                 Ok(Some(data))
             }
-            None => match DeserializeSeed::deserialize(seed, &mut *self.deserializer) {
-                Ok(data) => Ok(Some(data)),
-                Err(Error::EndOfBlock) => Ok(None),
-                Err(err) => Err(err),
-            },
+            None => {
+                if !self.deserializer.has_uncounted_element()? {
+                    return Ok(None);
+                }
+
+                Ok(Some(DeserializeSeed::deserialize(seed, &mut *self.deserializer)?))
+            }
         }
     }
 
@@ -351,7 +372,7 @@ struct BufferedFieldSeqAccess<'de, const WITH_IDENTS: bool> {
     field_data: Vec<Option<Vec<u8>>>,
     index: usize,
     remaining_depth: usize,
-    size_hints: SizeHints,
+    version: Version,
     _phantom: PhantomData<&'de ()>,
 }
 
@@ -396,7 +417,7 @@ impl<'de, const WITH_IDENTS: bool> BufferedFieldSeqAccess<'de, WITH_IDENTS> {
             field_data,
             index: 0,
             remaining_depth: deser.remaining_depth,
-            size_hints: deser.size_hints,
+            version: deser.version,
             _phantom: PhantomData,
         })
     }
@@ -425,7 +446,7 @@ impl<'de, const WITH_IDENTS: bool> serde::de::SeqAccess<'de> for BufferedFieldSe
                     raw.as_slice(),
                     raw.len(),
                     self.remaining_depth,
-                    self.size_hints,
+                    self.version,
                 );
                 let value = DeserializeSeed::deserialize(seed, &mut deser)?;
                 return Ok(Some(value));
@@ -460,11 +481,13 @@ impl<'a, 'b: 'a, R: Read, const WITH_IDENTS: bool> serde::de::MapAccess<'b>
                 let data = DeserializeSeed::deserialize(seed, &mut *self.deserializer)?;
                 Ok(Some(data))
             }
-            None => match DeserializeSeed::deserialize(seed, &mut *self.deserializer) {
-                Ok(data) => Ok(Some(data)),
-                Err(Error::EndOfBlock) => Ok(None),
-                Err(err) => Err(err),
-            },
+            None => {
+                if !self.deserializer.has_uncounted_element()? {
+                    return Ok(None);
+                }
+
+                Ok(Some(DeserializeSeed::deserialize(seed, &mut *self.deserializer)?))
+            }
         }
     }
 
