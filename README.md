@@ -3,20 +3,12 @@
 [![Crates.io](https://img.shields.io/crates/v/postbag.svg)](https://crates.io/crates/postbag)
 [![Documentation](https://docs.rs/postbag/badge.svg)](https://docs.rs/postbag)
 
-Postbag is a high-performance binary [serde] codec for Rust that provides efficient data encoding with configurable levels of forward and backward compatibility.
+Postbag is a compact binary [serde] codec for Rust that keeps the Rust type system
+fully intact and has support for backwards and forwards compatibility.
 
-[serde]: https://serde.rs
+## Quick start
 
-## Key Features
-
-- **Full fidelity of Rust type system**: Structs, enums, tuples, arrays, maps and all primitive types keep their shape; `Some(None)` stays distinct from `None`, and 128-bit integers stay integers.
-- **Efficient binary format**: Uses variable-length encoding (varint) for integers, compact representations for common types, and minimal overhead
-- **Configurable compatibility**: Choose between space-efficient encoding (`Slim`) or forward/backward compatible encoding (`Full`) with field identifiers
-
-### Limitations
-Like every non-self-describing format, Postbag cannot serve serde's `untagged`, internally tagged and `flatten` attributes, which need to inspect a value to decide how to read it.
-
-## Quick Start
+Normally you will want to use `to_full_vec` and `from_full_slice`:
 
 ```rust
 use serde::{Serialize, Deserialize};
@@ -28,53 +20,55 @@ struct Person {
     age: u32,
 }
 
-let original = Person {
-    name: "Alice".to_string(),
-    age: 30,
-};
+let person = Person { name: "Alice".to_string(), age: 30 };
 
-// Serialize to a byte vector using Full configuration
-let bytes = to_full_vec(&original).unwrap();
+let bytes = to_full_vec(&person)?;
+let restored: Person = from_full_slice(&bytes)?;
 
-// Deserialize back to the original type
-let deserialized: Person = from_full_slice(&bytes).unwrap();
-assert_eq!(original, deserialized);
+assert_eq!(person, restored);
+# Ok::<(), postbag::Error>(())
 ```
 
-## Encoding Configurations
+## Two data format variants
 
-Postbag provides two configurations: `Full` and `Slim`.
-Use the convenience functions `to_full_vec`, `from_full_slice`, `to_slim_vec` and
-`from_slim_slice`, or pass a configuration value to `to_vec`, `from_slice`,
-`serialize` and `deserialize`:
+Postbag `Full` writes each field with its, [optionally numbered](#numbered-identifiers),
+identifier and the length of its value, which is what lets fields be added, removed and reordered.
 
-```rust
-# use serde::{Serialize, Deserialize};
-# #[derive(Serialize, Deserialize, Debug, PartialEq)]
-# struct Person { name: String, age: u32 }
-# let person = Person { name: "Alice".to_string(), age: 30 };
-use postbag::{cfg::Slim, to_vec, from_slice};
+Postbag `Slim` writes the values and nothing else, in declaration order, which is smaller
+but only allows add struct fields and enum variants at the end.
 
-let bytes = to_vec(Slim::new(), &person).unwrap();
-let deserialized: Person = from_slice(Slim::new(), &bytes).unwrap();
-assert_eq!(person, deserialized);
-```
+Both variants use variable-length integer encoding to save space.
 
-The configuration also carries the [nesting depth limit](#nesting-depth-limit).
+Start with `Full` and use `Slim` when you need minimal size and can accept less compatibility.
 
-### `Full` Configuration
+## Backwards and forwards compatibility
 
-The `Full` configuration provides maximum compatibility and schema evolution capabilities:
+As usual a field a reader expects but does not receive takes its `#[serde(default)]`, and
+a variant it does not know needs a `#[serde(other)]` fallback.
 
-- **Forward/backward compatibility**: Fields and enum variants can be reordered, added, or removed
-- **Schema evolution**: Safe evolution of data structures over time
-- **Widening `char` to `String` and vice versa**: the two encode identically, and a peer that still expects a `char` reads the first character instead of failing
-- **Numerical identifier encoding**: Struct fields and enum variants named `_0` through `_59` are encoded with just a single byte
+The following changes to your types are supported:
 
-#### Numerical Identifier Encoding
+| Change to your types | `Full` | `Slim` |
+| --- | --- | --- |
+| **Structs** | | |
+| Add a field | anywhere | at the end |
+| Remove a field | anywhere | at the end |
+| Rename a field | when numbered | always |
+| Reorder fields | yes | no |
+| **Enums** | | |
+| Add a variant | anywhere | at the end |
+| Remove a variant | anywhere | at the end |
+| Rename a variant | when numbered | always |
+| Reorder variants | yes | no |
+| **Size** | small | even smaller |
 
-When using `Full` configuration, struct fields and enum variants named `_n` (where `n` is 0-59) are encoded using just a single byte instead of the full string. Use `#[serde(rename = "...")]` to specify the numerical id for each field or variant.
-This can significantly reduce serialized size for structs with many fields and enums with long variant names:
+
+## Numbered identifiers
+
+A struct field or enum variant renamed to `_0` through `_59` is encoded as a
+single byte instead of its name.
+This allows significant space savings in `Full` mode, while still providing full
+backwards and forwards compatibility.
 
 ```rust
 use serde::{Serialize, Deserialize};
@@ -85,7 +79,7 @@ struct CompactData {
     my_field: u32,
     #[serde(rename = "_15")]
     another_field: String,
-    // Regular field names work normally
+    // Regular field names work normally.
     normal_field: bool,
 }
 
@@ -97,43 +91,47 @@ enum CompactEnum {
     AnotherLongVariantName(u32),
     #[serde(rename = "_2")]
     YetAnotherVariant {
-        // Fields of struct variants can be numbered as well
+        // Fields of struct variants can be numbered as well.
         #[serde(rename = "_0")]
         my_field: u32,
     },
-    // Regular variant names work normally
+    // Regular variant names work normally.
     NormalVariant,
 }
 ```
 
-This feature is entirely optional; regular field and variant names continue to work as expected. Normal and numerical names can be mixed without limitations within a single struct or enum.
+Numbering is optional and can be mixed with names in the same type. A name that
+is not of the form `_n` is written out as a string.
 
-Names that do not have the form `_n`, as well as ids of 60 and above, are encoded as regular strings.
-Since the identifier determines compatibility, changing the id of a field or variant is a breaking change, but fields and variants can be reordered freely.
-An id that has been retired should never be given to a different field or variant. 
+The identifier is what a reader matches on, so **changing the id of a field or
+variant is a breaking change**, and an id that has been retired must never be
+given to a different field or variant.
 
-In addition, the [`compact`](https://docs.rs/postbag/latest/postbag/compact/) module provides more
-efficient representations of common types from the standard library.
+The [`compact`] module provides smaller representations of common standard library
+types, which would otherwise spell out their field and variant names.
 
-### `Slim` Configuration
+## Unsupported serde attributes
 
-The `Slim` configuration prioritizes performance and compact size:
+As a binary format Postbag cannot be used with serde's `untagged`, internally tagged
+and `flatten` attributes.
 
-- **Compact encoding**: Smaller serialized data size
-- **Fast processing**: No string lookups during serialization/deserialization  
-- **Limited schema evolution**: Fields/variants can only be added/removed at the end
+## Nesting depth limit
 
-**Supported changes** when using the `Slim` configuration:
-- Adding fields to the end of structs (with serde defaults for deserialization)
-- Removing fields from the end of structs (with serde defaults for deserialization)
-- Adding enum variants at the end
-- Removing enum variants from the end
+Serialization and deserialization of nested data is recursive, so deeply nested
+data consumes stack space. To prevent untrusted input from aborting the process
+by overflowing the stack, the nesting depth is limited to
+`cfg::DEFAULT_DEPTH_LIMIT` (128) and exceeding it fails with
+`Error::RecursionLimit`.
 
-**Important**: Fields and enum variants must maintain their order for compatibility when using `Slim` configuration.
+This only becomes relevant for recursive types, since the nesting depth of a
+non-recursive type is bounded by the type itself. Unknown fields are skipped by
+length rather than parsed, so unknown data cannot cause recursion.
 
-## Experimental Fast Compile Mode (for development use)
+## Fast compile mode (for development use)
 
-Postbag supports an optional fast compile mode that reduces compilation time at the cost of buffering struct field data in memory during deserialization (instead of streaming it directly from the reader).
+Postbag supports an optional fast compile mode that reduces compilation time at
+the cost of buffering struct field data in memory during deserialization,
+instead of streaming it directly from the reader.
 
 Enable it by setting the `postbag_fast_compile` cfg flag:
 
@@ -148,37 +146,13 @@ Or add it to your `.cargo/config.toml` for development:
 rustflags = ["--cfg", "postbag_fast_compile"]
 ```
 
-This flag is intended for development use only. Production builds should use the default streaming mode.
+This flag is intended **for development use only**; production builds must not use it.
 
-**Limitation**: Forward/backward compatibility for adding or removing struct fields in the middle (i.e. not at the end) is not supported in fast compile mode. Adding or removing fields at the end of structs continues to work.
-
-## Nesting Depth Limit
-
-Serialization and deserialization of nested data is recursive, so deeply nested
-data consumes stack space. To prevent untrusted input from aborting the process
-by overflowing the stack, the nesting depth is limited to `cfg::DEFAULT_DEPTH_LIMIT`
-(128) and exceeding it fails with `Error::RecursionLimit`.
-
-This only becomes relevant for recursive types, since the nesting depth of
-non-recursive types is bounded by the type itself. Unknown fields are skipped
-by length, thus unknown data cannot cause recursion.
-
-The limit is part of the configuration:
-
-```rust
-# use serde::{Serialize, Deserialize};
-# #[derive(Serialize, Deserialize)]
-# struct MyType { value: u32 }
-# let my_value = MyType { value: 1 };
-use postbag::{cfg::Full, to_vec, from_slice};
-
-let cfg = Full::new().with_depth_limit(1024);
-let bytes = to_vec(cfg, &my_value).unwrap();
-let value: MyType = from_slice(cfg, &bytes).unwrap();
-```
-
-Raise it for legitimately deeply nested data, or lower it when deserializing
-untrusted input on threads with a small stack.
+**Limitation**: in fast compile mode, fields are read positionally, so adding or
+removing a struct field anywhere but at the end is not supported.
+Adding and removing fields at the end continues to work.
+Serialization is unaffected, so an endpoint built with this flag
+interoperates with one built without it as long as both use the same types.
 
 ## Origins
 
