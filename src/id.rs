@@ -4,25 +4,31 @@
 //!
 //! | value | meaning |
 //! | --- | --- |
-//! | below [`ID_LEN`] | the length of the name, which follows |
-//! | [`ID_LEN`] | a longer name: its length follows as a varint, then the name |
-//! | [`ID_LEN_NAME`] and above | the number of the field, with no name at all |
+//! | below [`ID_LEN`] (0x40) | the length of the name, which follows |
+//! | [`ID_LEN`] (0x40) | a longer name: its length follows as a varint, then the name |
+//! | [`ID_LEN_NAME`] (0x41) to [`ID_LEN_NAME`] + [`ID_COUNT`] (0x7d) | the number of the field, with no name at all |
 //!
+//! The value never reaches [`ID_HAS_BLOCK`] (0x80).
 
 /// The name length that means the length itself follows.
 ///
 /// Also the first length that does not fit in the single varint, since the
 /// values above it name the numbered identifiers.
-pub const ID_LEN: usize = 64;
+pub const ID_LEN: u8 = 0x40;
 
 /// The first value that means a numbered identifier rather than a name.
-pub const ID_LEN_NAME: usize = ID_LEN + 1;
+pub const ID_LEN_NAME: u8 = ID_LEN + 1;
 
-/// How many identifiers encode as a number.
-pub const ID_COUNT: usize = 60;
+/// How many identifiers encode as a number. (= 0x3c)
+pub const ID_COUNT: u8 = 60;
+
+/// Flag that signals that a block follows.
+pub const ID_BLOCK: u8 = 0b1000_0000;
+
+const _: () = assert!(ID_LEN_NAME + ID_COUNT < ID_BLOCK);
 
 /// The identifiers that encode as a single byte, `_0` to `_59`.
-static NUMBERED_IDENTS: [&str; ID_COUNT] = [
+static NUMBERED_IDENTS: [&str; ID_COUNT as _] = [
     "_0", "_1", "_2", "_3", "_4", "_5", "_6", "_7", "_8", "_9", "_10", "_11", "_12", "_13", "_14", "_15", "_16",
     "_17", "_18", "_19", "_20", "_21", "_22", "_23", "_24", "_25", "_26", "_27", "_28", "_29", "_30", "_31",
     "_32", "_33", "_34", "_35", "_36", "_37", "_38", "_39", "_40", "_41", "_42", "_43", "_44", "_45", "_46",
@@ -30,13 +36,13 @@ static NUMBERED_IDENTS: [&str; ID_COUNT] = [
 ];
 
 /// The identifier a numbered field encodes to, if the number fits in one byte.
-pub fn numbered_ident(id: usize) -> Option<&'static str> {
-    NUMBERED_IDENTS.get(id).copied()
+pub fn numbered_ident(id: u8) -> Option<&'static str> {
+    NUMBERED_IDENTS.get(usize::from(id)).copied()
 }
 
 /// The number of an identifier of the form `_N`, if it encodes in one byte.
-pub fn ident_number(ident: &str) -> Option<usize> {
-    let id = ident.strip_prefix("_")?.parse::<usize>().ok()?;
+pub fn ident_number(ident: &str) -> Option<u8> {
+    let id = ident.strip_prefix("_")?.parse::<u8>().ok()?;
     (numbered_ident(id) == Some(ident)).then_some(id)
 }
 

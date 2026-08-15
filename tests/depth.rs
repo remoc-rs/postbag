@@ -50,16 +50,54 @@ fn hostile_slim(depth: usize) -> Vec<u8> {
     bytes
 }
 
-/// Hostile input: a long run of `Node` variant tags in full encoding.
+/// The length of a block whose contents fit in a single chunk.
+fn block_len(len: usize) -> Vec<u8> {
+    assert!(len < u16::MAX as usize, "a longer block would need continuation chunks");
+
+    let mut out = Vec::new();
+    let mut value = len as u16;
+    loop {
+        let byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value == 0 {
+            out.push(byte);
+            return out;
+        }
+        out.push(byte | 0x80);
+    }
+}
+
+/// Hostile input: `Node` variants nested far deeper than the limit allows, in
+/// full encoding.
+///
+/// Only the outermost variant carries a block. Every level below it reaches the
+/// end of that same block, so it states no length of its own and the nest stays
+/// a flat run of tags inside a single block.
 fn hostile_full(depth: usize) -> Vec<u8> {
+    assert!(depth > 0, "a tree of no depth is just a leaf");
+
     let mut bytes = Vec::new();
-    for _ in 0..depth {
-        bytes.push(4);
+    bytes.push(0x80 | 4); // `Node`, tagged as carrying a payload block
+    bytes.extend_from_slice(b"Node");
+    bytes.extend_from_slice(&block_len(5 * depth));
+
+    for _ in 0..depth - 1 {
+        bytes.push(4); // `Node`, reaching the end of the block above
         bytes.extend_from_slice(b"Node");
     }
-    bytes.push(4);
+    bytes.push(4); // `Leaf`, which carries nothing
     bytes.extend_from_slice(b"Leaf");
+
     bytes
+}
+
+#[test]
+fn the_hostile_input_is_what_the_writer_writes() {
+    // Without this the test below could pass on input the reader turns down for
+    // a reason that has nothing to do with the depth limit.
+    for depth in 1..8 {
+        assert_eq!(hostile_full(depth), to_full_vec(&Tree::nested(depth)).unwrap(), "at depth {depth}");
+    }
 }
 
 #[test]
@@ -78,7 +116,8 @@ fn deeply_nested_input_is_rejected_slim() {
 
 #[test]
 fn deeply_nested_input_is_rejected_full() {
-    let res: Result<Tree, _> = from_full_slice(&hostile_full(1_000_000));
+    // Far beyond the limit, and as deep as one chunk per level can express.
+    let res: Result<Tree, _> = from_full_slice(&hostile_full(4_000));
     assert!(matches!(res, Err(Error::RecursionLimit)), "expected recursion limit error, got {res:?}");
 }
 

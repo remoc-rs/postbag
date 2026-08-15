@@ -10,7 +10,7 @@ use crate::{
     cfg::{Cfg, Version},
     de::skippable::SkipRead,
     error::{Error, Result},
-    id::{ID_LEN, ID_LEN_NAME, numbered_ident},
+    id::{ID_BLOCK, ID_LEN, ID_LEN_NAME, numbered_ident},
     varint::{max_of_last_byte, varint_max},
 };
 
@@ -38,9 +38,6 @@ pub struct Deserializer<'de, R, const WITH_IDENTS: bool> {
     version: Version,
     /// Whether the value about to be deserialized reaches the end of the
     /// enclosing skippable block, so that it did not state its own length.
-    ///
-    /// The mirror of the flag of the same name in the serializer, and armed
-    /// at exactly the same places; see there.
     owns_block: bool,
     _de: PhantomData<&'de ()>,
 }
@@ -120,6 +117,12 @@ impl<'de, R: Read, const WITH_IDENTS: bool> Deserializer<'de, R, WITH_IDENTS> {
     /// Whether a field value left out its own length.
     fn field_owns_block(&self) -> bool {
         WITH_IDENTS && !self.version.is_0_4()
+    }
+
+    /// Whether the tag of an enum variant carries the flag stating whether a
+    /// block holding its payload follows.
+    fn variant_is_tagged(&self, owns_block: bool) -> bool {
+        self.field_owns_block() && !owns_block
     }
 
     /// Whether another element of a sequence or map whose length was not
@@ -229,22 +232,24 @@ impl<'de, R: Read, const WITH_IDENTS: bool> Deserializer<'de, R, WITH_IDENTS> {
         Err(Error::BadVarint)
     }
 
-    /// Reads a field or variant identifier.
-    ///
-    /// A numbered one is borrowed from [`numbered_ident`], so the common case
-    /// costs no allocation.
-    fn read_identifier(&mut self) -> Result<Cow<'static, str>> {
-        let v = self.read_varint_usize()?;
+    /// Reads an identifier and block flag.
+    fn read_identifier(&mut self) -> Result<(Cow<'static, str>, bool)> {
+        let mut id = self.input.read_u8()?;
 
-        if v >= ID_LEN_NAME {
-            let id = v - ID_LEN_NAME;
-            return numbered_ident(id).map(Cow::Borrowed).ok_or(Error::BadIdentifier);
-        }
+        let block = id & ID_BLOCK != 0;
+        id &= !ID_BLOCK;
 
-        let len = if v == ID_LEN { self.read_varint_usize()? } else { v };
+        let ident = if id >= ID_LEN_NAME {
+            let ident = numbered_ident(id - ID_LEN_NAME).ok_or(Error::BadIdentifier)?;
+            Cow::Borrowed(ident)
+        } else {
+            let len = if id == ID_LEN { self.read_varint_usize()? } else { id.into() };
+            let bytes = self.input.read(len)?;
+            let ident = String::from_utf8(bytes).map_err(|_| Error::BadIdentifier)?;
+            Cow::Owned(ident)
+        };
 
-        let bytes = self.input.read(len)?;
-        String::from_utf8(bytes).map(Cow::Owned).map_err(|_| Error::BadIdentifier)
+        Ok((ident, block))
     }
 }
 
@@ -405,7 +410,7 @@ impl<'de, const WITH_IDENTS: bool> BufferedFieldSeqAccess<'de, WITH_IDENTS> {
                 None => (),
             }
 
-            let ident = deser.read_identifier()?;
+            let (ident, _) = deser.read_identifier()?;
             let raw = deser.input.read_skippable_block()?;
             if let Some(&idx) = field_index.get(ident.as_ref()) {
                 field_data[idx] = Some(raw);
@@ -845,8 +850,8 @@ impl<'de, R: Read, const WITH_IDENTS: bool> de::Deserializer<'de> for &mut Deser
         V: Visitor<'de>,
     {
         match self.read_identifier()? {
-            Cow::Borrowed(ident) => visitor.visit_str(ident),
-            Cow::Owned(ident) => visitor.visit_string(ident),
+            (Cow::Borrowed(ident), _) => visitor.visit_str(ident),
+            (Cow::Owned(ident), _) => visitor.visit_string(ident),
         }
     }
 
@@ -858,49 +863,96 @@ impl<'de, R: Read, const WITH_IDENTS: bool> de::Deserializer<'de> for &mut Deser
     }
 }
 
-impl<'de, R: Read, const WITH_IDENTS: bool> serde::de::VariantAccess<'de>
-    for &mut Deserializer<'de, R, WITH_IDENTS>
-{
-    type Error = Error;
+/// Reader for the payload of an enum variant.
+pub struct EnumVariant<'a, 'b, R, const WITH_IDENTS: bool> {
+    deserializer: &'a mut Deserializer<'b, R, WITH_IDENTS>,
+    block: bool,
+}
 
-    fn unit_variant(self) -> Result<()> {
+impl<'a, 'b, R: Read, const WITH_IDENTS: bool> EnumVariant<'a, 'b, R, WITH_IDENTS> {
+    fn finish(self) -> Result<()> {
+        self.deserializer.owns_block = false;
+
+        if self.block {
+            self.deserializer.input.end_skippable()?;
+        }
+
         Ok(())
-    }
-
-    #[inline(never)]
-    fn newtype_variant_seed<V: DeserializeSeed<'de>>(self, seed: V) -> Result<V::Value> {
-        DeserializeSeed::deserialize(seed, self)
-    }
-
-    #[inline(never)]
-    fn tuple_variant<V: Visitor<'de>>(self, len: usize, visitor: V) -> Result<V::Value> {
-        serde::de::Deserializer::deserialize_tuple(self, len, visitor)
-    }
-
-    #[inline(never)]
-    fn struct_variant<V: Visitor<'de>>(self, _fields: &'static [&'static str], visitor: V) -> Result<V::Value> {
-        serde::de::Deserializer::deserialize_struct(self, "", _fields, visitor)
     }
 }
 
-impl<'de, R: Read, const WITH_IDENTS: bool> serde::de::EnumAccess<'de>
-    for &mut Deserializer<'de, R, WITH_IDENTS>
+impl<'a, 'b: 'a, R: Read, const WITH_IDENTS: bool> serde::de::VariantAccess<'b>
+    for EnumVariant<'a, 'b, R, WITH_IDENTS>
 {
     type Error = Error;
-    type Variant = Self;
 
-    fn variant_seed<V: DeserializeSeed<'de>>(self, seed: V) -> Result<(V::Value, Self)> {
-        let v = if WITH_IDENTS {
-            let ident = self.read_identifier()?;
+    #[inline(never)]
+    fn unit_variant(self) -> Result<()> {
+        // Nothing is read, so a payload that is there is skipped whole. This
+        // is the path a `#[serde(other)]` fallback takes.
+        self.finish()
+    }
+
+    #[inline(never)]
+    fn newtype_variant_seed<V: DeserializeSeed<'b>>(self, seed: V) -> Result<V::Value> {
+        let value = DeserializeSeed::deserialize(seed, &mut *self.deserializer)?;
+        self.finish()?;
+        Ok(value)
+    }
+
+    #[inline(never)]
+    fn tuple_variant<V: Visitor<'b>>(self, len: usize, visitor: V) -> Result<V::Value> {
+        let value = serde::de::Deserializer::deserialize_tuple(&mut *self.deserializer, len, visitor)?;
+        self.finish()?;
+        Ok(value)
+    }
+
+    #[inline(never)]
+    fn struct_variant<V: Visitor<'b>>(self, fields: &'static [&'static str], visitor: V) -> Result<V::Value> {
+        let value = serde::de::Deserializer::deserialize_struct(&mut *self.deserializer, "", fields, visitor)?;
+        self.finish()?;
+        Ok(value)
+    }
+}
+
+impl<'a, 'de, R: Read, const WITH_IDENTS: bool> serde::de::EnumAccess<'de>
+    for &'a mut Deserializer<'de, R, WITH_IDENTS>
+{
+    type Error = Error;
+    type Variant = EnumVariant<'a, 'de, R, WITH_IDENTS>;
+
+    fn variant_seed<V: DeserializeSeed<'de>>(self, seed: V) -> Result<(V::Value, Self::Variant)> {
+        let owns_block = self.takes_block();
+
+        let (v, block) = if WITH_IDENTS {
+            let (ident, has_block) = self.read_identifier()?;
             let deserializer: StrDeserializer<Error> = ident.as_ref().into_deserializer();
-            DeserializeSeed::deserialize(seed, deserializer)?
+            (DeserializeSeed::deserialize(seed, deserializer)?, has_block)
         } else {
             let varint = self.read_varint_u32()?;
             let deserializer: U32Deserializer<Error> = varint.into_deserializer();
-            DeserializeSeed::deserialize(seed, deserializer)?
+            (DeserializeSeed::deserialize(seed, deserializer)?, false)
         };
 
-        Ok((v, self))
+        let opened = self.variant_is_tagged(owns_block);
+        if opened {
+            // Variant does not own surrounding block.
+            if block {
+                // And will be followed by its own block.
+                self.input.start_skippable();
+            } else {
+                // And will not be followed by its own block, but deserializer code expects
+                // a block it can close when done reading the contents; thus open an empty
+                // block.
+                self.input.start_empty_block();
+            }
+        }
+
+        // The payload reaches the end of a block, whether the enclosing one or
+        // the one just opened.
+        self.owns_block = opened || owns_block;
+
+        Ok((v, EnumVariant { deserializer: self, block: opened }))
     }
 }
 

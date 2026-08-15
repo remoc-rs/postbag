@@ -51,6 +51,14 @@ impl<R: Read> SkipRead<R> {
         self.0 = SkipStack::SkipBlock(SkipBlock::new(this));
     }
 
+    /// Opens a block that holds nothing and reads no length from the input.
+    ///
+    /// Must be paired with a call to [`Self::end_skippable`].
+    pub fn start_empty_block(&mut self) {
+        let this = mem::replace(&mut self.0, SkipStack::Dummy);
+        self.0 = SkipStack::SkipBlock(SkipBlock::exact(this, 0));
+    }
+
     /// Finishes a skippable block.
     ///
     /// Remaining contents of the block are skipped if not yet read.

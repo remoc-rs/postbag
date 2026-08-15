@@ -6,7 +6,7 @@ use crate::{
     FALSE, MORE, NO_MORE, NONE, SOME, SPECIAL_LEN, TRUE, UNKNOWN_LEN,
     cfg::{Cfg, Version},
     error::{Error, Result},
-    id::{ID_LEN, ID_LEN_NAME, ident_number},
+    id::{ID_BLOCK, ID_LEN, ID_LEN_NAME, ident_number},
     ser::skippable::SkipWrite,
     varint::*,
 };
@@ -76,6 +76,12 @@ impl<W: Write, const WITH_IDENTS: bool> Serializer<W, WITH_IDENTS> {
         WITH_IDENTS && !self.version.is_0_4()
     }
 
+    /// Whether the tag of an enum variant carries the flag stating whether a
+    /// block holding its payload follows.
+    fn variant_is_tagged(&self, owns_block: bool) -> bool {
+        self.field_owns_block() && !owns_block
+    }
+
     /// Get the writer.
     pub fn finalize(self) -> W {
         self.output.into_inner()
@@ -114,17 +120,33 @@ impl<W: Write, const WITH_IDENTS: bool> Serializer<W, WITH_IDENTS> {
         Ok(())
     }
 
-    fn write_identifier(&mut self, ident: &str) -> Result<()> {
+    /// Writes an identifier and block flag.
+    fn write_identifier(&mut self, ident: &str, block: bool) -> Result<()> {
         match ident_number(ident) {
             Some(id) => {
-                self.write_usize(ID_LEN_NAME + id)?;
+                // Identifier encoded as number
+                let mut id = ID_LEN_NAME + id;
+                if block {
+                    id |= ID_BLOCK;
+                }
+                self.output.write(&[id])?;
             }
             None => {
                 let len = ident.len();
-                if len < ID_LEN {
-                    self.write_usize(len)?;
+                if len < ID_LEN.into() {
+                    // Identifier encoded as string shorter than ID_LEN
+                    let mut len = len as u8;
+                    if block {
+                        len |= ID_BLOCK;
+                    }
+                    self.output.write(&[len])?;
                 } else {
-                    self.write_usize(ID_LEN)?;
+                    // Identifier encoded as string
+                    let mut id = ID_LEN;
+                    if block {
+                        id |= ID_BLOCK;
+                    }
+                    self.output.write(&[id])?;
                     self.write_usize(len)?;
                 }
 
@@ -146,10 +168,10 @@ where
     type SerializeSeq = SeqSerializer<'a, W, WITH_IDENTS>;
     type SerializeTuple = Self;
     type SerializeTupleStruct = Self;
-    type SerializeTupleVariant = Self;
+    type SerializeTupleVariant = VariantSerializer<'a, W, WITH_IDENTS>;
     type SerializeMap = MapSerializer<'a, W, WITH_IDENTS>;
     type SerializeStruct = Self;
-    type SerializeStructVariant = Self;
+    type SerializeStructVariant = VariantSerializer<'a, W, WITH_IDENTS>;
 
     fn is_human_readable(&self) -> bool {
         false
@@ -262,8 +284,10 @@ where
     fn serialize_unit_variant(
         self, _name: &'static str, variant_index: u32, variant: &'static str,
     ) -> Result<()> {
+        self.takes_block();
+
         if WITH_IDENTS {
-            self.write_identifier(variant)?;
+            self.write_identifier(variant, false)?;
         } else {
             self.write_u32(variant_index)?;
         }
@@ -287,16 +311,26 @@ where
         T: ?Sized + Serialize,
     {
         let owns_block = self.takes_block();
+        let block = self.variant_is_tagged(owns_block);
 
         if WITH_IDENTS {
-            self.write_identifier(variant)?;
+            if block {
+                self.write_identifier(variant, true)?;
+                self.output.start_skippable();
+            } else {
+                self.write_identifier(variant, false)?;
+            }
         } else {
             self.write_u32(variant_index)?;
         }
 
         // The identifier comes first and the payload still reaches the end of
-        // the block.
-        self.recurse(owns_block, |ser| value.serialize(ser))?;
+        // a block, whether that is the enclosing one or the one just opened.
+        self.recurse(block || owns_block, |ser| value.serialize(ser))?;
+
+        if block {
+            self.output.end_skippable()?;
+        }
 
         Ok(())
     }
@@ -327,15 +361,22 @@ where
     }
 
     fn serialize_tuple_variant(
-        self, _name: &'static str, variant_index: u32, variant: &'static str, _len: usize,
+        self, _name: &'static str, variant_index: u32, variant: &'static str, len: usize,
     ) -> Result<Self::SerializeTupleVariant> {
+        let owns_block = self.takes_block();
+        let block = self.variant_is_tagged(owns_block) && len > 0;
+
         if WITH_IDENTS {
-            self.write_identifier(variant)?;
+            self.write_identifier(variant, block)?;
         } else {
             self.write_u32(variant_index)?;
         }
 
-        Ok(self)
+        if block {
+            self.output.start_skippable();
+        }
+
+        Ok(VariantSerializer { serializer: self, block })
     }
 
     fn serialize_map(self, len: Option<usize>) -> Result<Self::SerializeMap> {
@@ -373,15 +414,22 @@ where
         self, _name: &'static str, variant_index: u32, variant: &'static str, len: usize,
     ) -> Result<Self::SerializeStructVariant> {
         let owns_block = self.takes_block();
+        let block = self.variant_is_tagged(owns_block) && len > 0;
 
         if WITH_IDENTS {
-            self.write_identifier(variant)?;
+            self.write_identifier(variant, block)?;
         } else {
             self.write_u32(variant_index)?;
         }
 
-        // As for a plain struct, with the identifier written first.
-        if !owns_block {
+        if block {
+            self.output.start_skippable();
+        }
+
+        // As for a plain struct: the body reaches the end of a block, so it
+        // states no field count. Under `Slim` there is no such
+        // block and the count is what says where the fields end.
+        if !self.field_owns_block() && !owns_block {
             self.write_usize(len)?;
         }
 
@@ -389,7 +437,7 @@ where
             self.output.start_skippable();
         }
 
-        Ok(self)
+        Ok(VariantSerializer { serializer: self, block: block || !WITH_IDENTS })
     }
 }
 
@@ -469,7 +517,27 @@ where
     }
 }
 
-impl<W, const WITH_IDENTS: bool> ser::SerializeTupleVariant for &mut Serializer<W, WITH_IDENTS>
+/// Serializer for the payload of a tuple or struct enum variant.
+///
+/// Holds whether a block was opened that has to be closed when the variant
+/// ends: the one wrapping the payload, or, in `Slim`, the one a struct variant
+/// has always had.
+pub struct VariantSerializer<'a, W, const WITH_IDENTS: bool> {
+    serializer: &'a mut Serializer<W, WITH_IDENTS>,
+    block: bool,
+}
+
+impl<'a, W: Write, const WITH_IDENTS: bool> VariantSerializer<'a, W, WITH_IDENTS> {
+    fn finish(self) -> Result<()> {
+        if self.block {
+            self.serializer.output.end_skippable()?;
+        }
+
+        Ok(())
+    }
+}
+
+impl<'a, W, const WITH_IDENTS: bool> ser::SerializeTupleVariant for VariantSerializer<'a, W, WITH_IDENTS>
 where
     W: Write,
 {
@@ -481,11 +549,11 @@ where
     where
         T: ?Sized + Serialize,
     {
-        (**self).recurse(false, |ser| value.serialize(ser))
+        self.serializer.recurse(false, |ser| value.serialize(ser))
     }
 
     fn end(self) -> Result<()> {
-        Ok(())
+        self.finish()
     }
 }
 
@@ -546,7 +614,7 @@ where
         T: ?Sized + Serialize,
     {
         if WITH_IDENTS {
-            self.write_identifier(key)?;
+            self.write_identifier(key, false)?;
             self.output.start_skippable();
         }
 
@@ -571,7 +639,7 @@ where
     }
 }
 
-impl<W, const WITH_IDENTS: bool> ser::SerializeStructVariant for &mut Serializer<W, WITH_IDENTS>
+impl<'a, W, const WITH_IDENTS: bool> ser::SerializeStructVariant for VariantSerializer<'a, W, WITH_IDENTS>
 where
     W: Write,
 {
@@ -584,28 +652,24 @@ where
         T: ?Sized + Serialize,
     {
         if WITH_IDENTS {
-            self.write_identifier(key)?;
-            self.output.start_skippable();
+            self.serializer.write_identifier(key, false)?;
+            self.serializer.output.start_skippable();
         }
 
         // The block just started ends where this value does, so the value can
         // leave out a length of its own.
-        let owns_block = self.field_owns_block();
-        (**self).recurse(owns_block, |ser| value.serialize(ser))?;
+        let owns_block = self.serializer.field_owns_block();
+        self.serializer.recurse(owns_block, |ser| value.serialize(ser))?;
 
         if WITH_IDENTS {
-            self.output.end_skippable()?;
+            self.serializer.output.end_skippable()?;
         }
 
         Ok(())
     }
 
     fn end(self) -> Result<()> {
-        if !WITH_IDENTS {
-            self.output.end_skippable()?;
-        }
-
-        Ok(())
+        self.finish()
     }
 }
 
