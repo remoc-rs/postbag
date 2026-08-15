@@ -176,10 +176,18 @@ impl<const WITH_IDENTS: bool> fmt::Debug for Cfg<WITH_IDENTS> {
 ///
 /// Struct field identifiers and enum variant identifiers are serialized
 /// as strings or using numerical identifier encoding.
+///
+/// See the [Postbag Full format 1.0 specification][specification].
+///
+/// [specification]: https://github.com/remoc-rs/postbag/blob/main/POSTBAG-FULL.md
 pub type Full = Cfg<true>;
 
 /// Serialize without identifiers.
 ///
 /// Struct field identifiers are not serialized.
 /// Enum variants are serialized using their index.
+///
+/// See the [Postbag Slim format 1.0 specification][specification].
+///
+/// [specification]: https://github.com/remoc-rs/postbag/blob/main/POSTBAG-SLIM.md
 pub type Slim = Cfg<false>;

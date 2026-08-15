@@ -41,6 +41,11 @@ Both variants use variable-length integer encoding to save space.
 
 Start with `Full` and use `Slim` when you need minimal size and can accept less compatibility.
 
+The wire formats are specified separately:
+
+- [Postbag Full format 1.0](https://github.com/remoc-rs/postbag/blob/main/POSTBAG-FULL.md)
+- [Postbag Slim format 1.0](https://github.com/remoc-rs/postbag/blob/main/POSTBAG-SLIM.md)
+
 ## Backwards and forwards compatibility
 
 As usual a field a reader expects but does not receive takes its `#[serde(default)]`, and
