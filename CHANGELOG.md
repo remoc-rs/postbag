@@ -21,6 +21,7 @@ To be compatible with Postbag 0.4 use `cfg::Version::Postbag0_4`.
 - Recoverable deserialization via recoverable module allows replacements
   of values that failed deserialization either by their default or custom
   replacement values.
+- Optional header with Postbag version (enabled by default)
 - Minimum supported Rust version (MSRV) is 1.95
 
 ## 0.4.3
