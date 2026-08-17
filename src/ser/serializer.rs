@@ -7,6 +7,7 @@ use crate::{
     cfg::{Cfg, Version},
     error::{Error, Result},
     id::{ID_BLOCK, ID_LEN, ID_LEN_NAME, ident_number},
+    recoverable::Recoverable,
     ser::skippable::SkipWrite,
     varint::*,
 };
@@ -294,14 +295,34 @@ where
         Ok(())
     }
 
-    fn serialize_newtype_struct<T>(self, _name: &'static str, value: &T) -> Result<()>
+    fn serialize_newtype_struct<T>(self, name: &'static str, value: &T) -> Result<()>
     where
         T: ?Sized + Serialize,
     {
-        // A newtype struct writes nothing of its own, so the value keeps the
-        // whole block.
         let owns_block = self.takes_block();
-        self.recurse(owns_block, |ser| value.serialize(ser))
+
+        // A recoverable value must be enclosed in a block of its own, so that
+        // deserialization can skip over it once it fails. Where the value
+        // already reaches the end of the enclosing block, that block bounds it
+        // just as well and nothing is added, making the representation the
+        // same as without the wrapper.
+        let block = name == Recoverable::NEWTYPE_NAME && !owns_block;
+        if block {
+            self.output.start_skippable();
+        }
+
+        // A newtype struct writes nothing of its own, so the value keeps the
+        // whole block. Leaving out its own length is only supported where a
+        // block encloses each field value to begin with, so a block opened
+        // here is handed on as such only there.
+        let value_owns_block = if block { self.field_owns_block() } else { owns_block };
+        self.recurse(value_owns_block, |ser| value.serialize(ser))?;
+
+        if block {
+            self.output.end_skippable()?;
+        }
+
+        Ok(())
     }
 
     fn serialize_newtype_variant<T>(

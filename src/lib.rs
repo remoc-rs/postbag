@@ -12,6 +12,7 @@ mod de;
 mod error;
 pub mod fixint;
 mod id;
+pub mod recoverable;
 mod ser;
 mod varint;
 

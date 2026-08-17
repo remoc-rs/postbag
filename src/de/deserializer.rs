@@ -11,6 +11,7 @@ use crate::{
     de::skippable::SkipRead,
     error::{Error, Result},
     id::{ID_BLOCK, ID_LEN, ID_LEN_NAME, numbered_ident},
+    recoverable::Recoverable,
     varint::{max_of_last_byte, varint_max},
 };
 
@@ -723,14 +724,33 @@ impl<'de, R: Read, const WITH_IDENTS: bool> de::Deserializer<'de> for &mut Deser
         self.deserialize_unit(visitor)
     }
 
-    fn deserialize_newtype_struct<V>(self, _name: &'static str, visitor: V) -> Result<V::Value>
+    fn deserialize_newtype_struct<V>(self, name: &'static str, visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
-        // Mirrors `serialize_newtype_struct`: nothing of its own is written,
-        // so the value keeps the whole block.
         let owns_block = self.takes_block();
-        self.recurse(owns_block, |de| visitor.visit_newtype_struct(de))
+
+        if name != Recoverable::NEWTYPE_NAME {
+            return self.recurse(owns_block, |de| visitor.visit_newtype_struct(de));
+        }
+
+        // A recoverable value is bounded by a block.
+        let depth = self.input.depth();
+        let block = !owns_block;
+        if block {
+            self.input.start_skippable();
+        }
+
+        let value_owns_block = if block { self.field_owns_block() } else { owns_block };
+        let res = self.recurse(value_owns_block, |de| visitor.visit_newtype_struct(de));
+
+        // A value that failed stopped wherever it was and the visitor has
+        // turned the failure into a recovered value. Thus we still need
+        // to discard blocks that have remained open and clear flags.
+        self.input.pop_to(depth)?;
+        self.owns_block = false;
+
+        res
     }
 
     fn deserialize_seq<V>(self, visitor: V) -> Result<V::Value>

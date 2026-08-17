@@ -1,6 +1,9 @@
 //! Skippable blocks reader.
 
-use std::{io::Read, mem};
+use std::{
+    io::{ErrorKind, Read},
+    mem,
+};
 
 use crate::{
     Error, Result,
@@ -12,7 +15,13 @@ use crate::{
 const READ_CHUNK: usize = 64 * 1024;
 
 /// Reader that allows blocks to be (partially) skipped.
-pub struct SkipRead<R>(SkipStack<R>);
+pub struct SkipRead<R> {
+    stack: SkipStack<R>,
+    /// How many skippable blocks are open.
+    depth: usize,
+    /// Kind of the first failure of the contained reader, if it has failed.
+    failure: Option<ErrorKind>,
+}
 
 impl<R: Read> SkipRead<R> {
     /// Creates a new skip stack.
@@ -22,11 +31,23 @@ impl<R: Read> SkipRead<R> {
     /// value reaching the end of its block is bounded by them and cannot read
     /// beyond.
     pub fn new_value(inner: R, len: usize) -> Self {
-        Self(SkipStack::SkipBlock(SkipBlock::exact(SkipStack::Base(inner), len)))
+        let stack = SkipStack::SkipBlock(SkipBlock::exact(SkipStack::Base(inner), len));
+        Self { stack, depth: 1, failure: None }
     }
 
     pub fn new(inner: R) -> Self {
-        Self(SkipStack::Base(inner))
+        Self { stack: SkipStack::Base(inner), depth: 0, failure: None }
+    }
+
+    /// Notes a failure of the contained reader and passes the result on.
+    ///
+    /// Every read goes through here, and [`Error::Io`] arises nowhere but from
+    /// the contained reader, so this sees every failure of it.
+    fn note_failure<T>(&mut self, res: Result<T>) -> Result<T> {
+        if let Err(Error::Io(err)) = &res {
+            self.failure.get_or_insert(err.kind());
+        }
+        res
     }
 
     /// Read one byte.
@@ -35,45 +56,74 @@ impl<R: Read> SkipRead<R> {
     /// every tag, every block length — so this must not go through the
     /// buffer-returning path and allocate for each one.
     pub fn read_u8(&mut self) -> Result<u8> {
-        self.0.read_byte()
+        let res = self.stack.read_byte();
+        self.note_failure(res)
     }
 
     /// Read `cnt` bytes.
     pub fn read(&mut self, cnt: usize) -> Result<Vec<u8>> {
-        self.0.read(cnt)
+        let res = self.stack.read(cnt);
+        self.note_failure(res)
     }
 
     /// Opens a skippable block.
     ///
     /// Must be paired with a call to [`Self::end_skippable`].
     pub fn start_skippable(&mut self) {
-        let this = mem::replace(&mut self.0, SkipStack::Dummy);
-        self.0 = SkipStack::SkipBlock(SkipBlock::new(this));
+        let this = mem::replace(&mut self.stack, SkipStack::Dummy);
+        self.stack = SkipStack::SkipBlock(SkipBlock::new(this));
+        self.depth += 1;
     }
 
     /// Opens a block that holds nothing and reads no length from the input.
     ///
     /// Must be paired with a call to [`Self::end_skippable`].
     pub fn start_empty_block(&mut self) {
-        let this = mem::replace(&mut self.0, SkipStack::Dummy);
-        self.0 = SkipStack::SkipBlock(SkipBlock::exact(this, 0));
+        let this = mem::replace(&mut self.stack, SkipStack::Dummy);
+        self.stack = SkipStack::SkipBlock(SkipBlock::exact(this, 0));
+        self.depth += 1;
     }
 
     /// Finishes a skippable block.
     ///
     /// Remaining contents of the block are skipped if not yet read.
     pub fn end_skippable(&mut self) -> Result<()> {
-        match mem::replace(&mut self.0, SkipStack::Dummy) {
+        match mem::replace(&mut self.stack, SkipStack::Dummy) {
             SkipStack::Base(_) => panic!("no skip block is open"),
-            SkipStack::SkipBlock(sb) => self.0 = sb.finish()?,
+            SkipStack::SkipBlock(sb) => self.stack = self.note_failure(sb.finish())?,
             SkipStack::Dummy => unreachable!(),
         }
+
+        self.depth -= 1;
+        Ok(())
+    }
+
+    /// How many skippable blocks are open.
+    ///
+    /// Passed to [`Self::pop_to`] to return to this state.
+    pub fn depth(&self) -> usize {
+        self.depth
+    }
+
+    /// Closes every skippable block opened since the stack was `depth` deep,
+    /// skipping over whatever is left of each.
+    pub fn pop_to(&mut self, depth: usize) -> Result<()> {
+        assert!(depth <= self.depth, "cannot return to a depth that is not open");
+
+        if let Some(kind) = self.failure {
+            return Err(Error::Io(kind.into()));
+        }
+
+        while self.depth > depth {
+            self.end_skippable()?;
+        }
+
         Ok(())
     }
 
     /// Returns the contained reader.
     pub fn into_inner(self) -> R {
-        self.0.into_inner()
+        self.stack.into_inner()
     }
 
     /// Opens a skippable block, reads all its contents, and closes it.
@@ -81,8 +131,9 @@ impl<R: Read> SkipRead<R> {
     /// Returns the raw bytes contained within the skippable block.
     pub fn read_skippable_block(&mut self) -> Result<Vec<u8>> {
         self.start_skippable();
-        let SkipStack::SkipBlock(sb) = &mut self.0 else { unreachable!() };
-        let data = sb.read_all()?;
+        let SkipStack::SkipBlock(sb) = &mut self.stack else { unreachable!() };
+        let res = sb.read_all();
+        let data = self.note_failure(res)?;
         self.end_skippable()?;
         Ok(data)
     }
@@ -92,10 +143,11 @@ impl<R: Read> SkipRead<R> {
     /// Used to find the end of a run of values that reaches the end of the
     /// block, in place of a count written before it.
     pub fn block_exhausted(&mut self) -> Result<bool> {
-        match &mut self.0 {
+        let res = match &mut self.stack {
             SkipStack::SkipBlock(sb) => sb.exhausted(),
             SkipStack::Base(_) | SkipStack::Dummy => unreachable!("no block to be at the end of"),
-        }
+        };
+        self.note_failure(res)
     }
 
     /// Reads the remainder of the innermost open skippable block.
@@ -105,10 +157,11 @@ impl<R: Read> SkipRead<R> {
     /// no boundary to read up to, and reading the rest of the input instead
     /// would swallow whatever follows the value.
     pub fn read_rest(&mut self) -> Result<Vec<u8>> {
-        match &mut self.0 {
+        let res = match &mut self.stack {
             SkipStack::SkipBlock(sb) => sb.read_all(),
             SkipStack::Base(_) | SkipStack::Dummy => unreachable!("no block to read to the end of"),
-        }
+        };
+        self.note_failure(res)
     }
 }
 
