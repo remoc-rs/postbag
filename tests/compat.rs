@@ -490,9 +490,10 @@ fn reordered_enum_variants_with_numerical_ids_full_encoding() {
     let structed: Reordered = transform(&Original::VariantWithFields { value: 9 }, Full::new());
     assert_eq!(structed, Reordered::VariantWithFields { value: 9 });
 
-    // A numerically identified variant occupies a single byte.
+    // A numerically identified variant occupies a single byte, which is about
+    // the value alone, so the header is left out here.
     let mut serialized = Vec::new();
-    serialize(Full::new(), &mut serialized, &Original::AnotherLongVariantName).unwrap();
+    serialize(Full::new().with_header(false), &mut serialized, &Original::AnotherLongVariantName).unwrap();
     assert_eq!(serialized.len(), 1);
 }
 

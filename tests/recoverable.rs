@@ -3,10 +3,21 @@
 use serde::{Deserialize, Serialize};
 
 use postbag::{
+    cfg::{Full, Slim},
     from_full_slice, from_slim_slice,
     recoverable::{Recover, Recoverable},
-    to_full_vec, to_slim_vec,
+    to_full_vec, to_slim_vec, to_vec,
 };
+
+/// The tests stating exact bytes are about the framing of the value alone, so
+/// they leave out the header a stream otherwise begins with.
+fn bare_full<T: Serialize + ?Sized>(value: &T) -> Vec<u8> {
+    to_vec(Full::new().with_header(false), value).unwrap()
+}
+
+fn bare_slim<T: Serialize + ?Sized>(value: &T) -> Vec<u8> {
+    to_vec(Slim::new().with_header(false), value).unwrap()
+}
 
 #[derive(Default, Serialize)]
 struct B {
@@ -130,13 +141,13 @@ fn sequence_element_gains_a_block() {
     let wrapped = WrappedSeq { v: vec![Recoverable::new(7), Recoverable::new(8)] };
 
     // One field, identifier `v`, length of its value, two elements.
-    assert_eq!(to_full_vec(&plain).unwrap(), [1, 1, b'v', 3, 2, 7, 8]);
+    assert_eq!(bare_full(&plain), [1, 1, b'v', 3, 2, 7, 8]);
     // Each element is preceded by the length of its block.
-    assert_eq!(to_full_vec(&wrapped).unwrap(), [1, 1, b'v', 5, 2, 1, 7, 1, 8]);
+    assert_eq!(bare_full(&wrapped), [1, 1, b'v', 5, 2, 1, 7, 1, 8]);
 
     // One field, length of the struct body, two elements.
-    assert_eq!(to_slim_vec(&plain).unwrap(), [1, 3, 2, 7, 8]);
-    assert_eq!(to_slim_vec(&wrapped).unwrap(), [1, 5, 2, 1, 7, 1, 8]);
+    assert_eq!(bare_slim(&plain), [1, 3, 2, 7, 8]);
+    assert_eq!(bare_slim(&wrapped), [1, 5, 2, 1, 7, 1, 8]);
 }
 
 /// A value that owns a block may leave out its own length, but only in `Full`;
@@ -150,7 +161,7 @@ fn slim_nested_value_is_self_describing() {
 
     // One field, length of the struct body, length of the block, length of the
     // vector, its elements.
-    assert_eq!(to_slim_vec(&Nested { v: Recoverable::new(vec![1, 2, 3]) }).unwrap(), [1, 5, 4, 3, 1, 2, 3]);
+    assert_eq!(bare_slim(&Nested { v: Recoverable::new(vec![1, 2, 3]) }), [1, 5, 4, 3, 1, 2, 3]);
 }
 
 /// A struct that owns the block added for it leaves out its field count, so
@@ -173,10 +184,10 @@ fn full_nested_struct_drops_its_field_count() {
     }
 
     // Element: field count, identifier `x`, length of its value, the value.
-    assert_eq!(to_full_vec(&PlainSeq { v: vec![Small { x: 7 }] }).unwrap(), [1, 1, b'v', 6, 1, 1, 1, b'x', 1, 7]);
+    assert_eq!(bare_full(&PlainSeq { v: vec![Small { x: 7 }] }), [1, 1, b'v', 6, 1, 1, 1, b'x', 1, 7]);
     // Element: length of its block, then the fields, without a count.
     assert_eq!(
-        to_full_vec(&WrappedSeq { v: vec![Recoverable::new(Small { x: 7 })] }).unwrap(),
+        bare_full(&WrappedSeq { v: vec![Recoverable::new(Small { x: 7 })] }),
         [1, 1, b'v', 6, 1, 4, 1, b'x', 1, 7]
     );
 }

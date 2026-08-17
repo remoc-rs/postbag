@@ -37,11 +37,15 @@ pub(crate) mod skippable;
 /// serialize(Full::new(), &mut buffer, &person).unwrap();
 /// println!("Serialized {} bytes", buffer.len());
 /// ```
-pub fn serialize<W, T, const WITH_IDENTS: bool>(cfg: Cfg<WITH_IDENTS>, writer: W, value: &T) -> Result<()>
+pub fn serialize<W, T, const WITH_IDENTS: bool>(cfg: Cfg<WITH_IDENTS>, mut writer: W, value: &T) -> Result<()>
 where
     W: std::io::Write,
     T: Serialize + ?Sized,
 {
+    if cfg.header() {
+        writer.write_all(&cfg.header_bytes())?;
+    }
+
     let mut serializer = Serializer::<W, WITH_IDENTS>::new(writer, cfg);
     // The root value occupies one nesting level, mirroring the deserializer,
     // which charges a level for entering a container even when that container

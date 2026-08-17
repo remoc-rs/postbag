@@ -833,7 +833,10 @@ fn error_handling_vec_bounds() {
     // This won't actually prove anything since tests will likely always be
     // run on devices with larger amounts of memory, but it can't hurt.
     assert!(matches!(
-        deserialize::<_, Vec<u8>, false>(Slim::new(), [(1 << 7) | 8, 255, 255, 255, 0, 0, 0, 0, 0].as_slice()),
+        deserialize::<_, Vec<u8>, false>(
+            Slim::new().with_header(false),
+            [(1 << 7) | 8, 255, 255, 255, 0, 0, 0, 0, 0].as_slice()
+        ),
         Err(Error::Io(io)) if io.kind() == ErrorKind::UnexpectedEof
     ));
 }
@@ -842,7 +845,9 @@ fn error_handling_vec_bounds() {
 fn varint_boundary_tests() {
     loopback(u32::MAX);
 
-    let deser = deserialize::<_, u32, false>(Slim::new(), [0xFF, 0xFF, 0xFF, 0xFF, 0x1F].as_slice());
+    // The bytes are a value on its own, so no header precedes them.
+    let deser =
+        deserialize::<_, u32, false>(Slim::new().with_header(false), [0xFF, 0xFF, 0xFF, 0xFF, 0x1F].as_slice());
     assert!(matches!(deser, Err(Error::BadVarint)));
 }
 

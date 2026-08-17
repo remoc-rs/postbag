@@ -17,6 +17,18 @@ use postbag::{
     deserialize, serialize,
 };
 
+/// The bytes stated below are the framing of the value alone, so nothing here
+/// writes or expects the header a stream otherwise begins with. It would in
+/// any case be absent under `Version::Postbag0_4`, which knows none, and so
+/// would tell the two versions apart on its own.
+fn full() -> Full {
+    Full::new().with_header(false)
+}
+
+fn slim() -> Slim {
+    Slim::new().with_header(false)
+}
+
 /// A struct with one numbered field, so that the bytes are the framing of
 /// that field and nothing else.
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -41,7 +53,7 @@ where
     let mut written = Vec::new();
 
     for version in [Version::Postbag1, Version::Postbag0_4] {
-        let cfg = Full::new().with_version(version);
+        let cfg = full().with_version(version);
 
         let mut bytes = Vec::new();
         serialize(cfg, &mut bytes, value).expect("serialization failed");
@@ -174,7 +186,7 @@ fn a_nested_struct_leaves_out_its_field_count() {
 fn a_top_level_struct_keeps_its_field_count() {
     // Nothing delimits it, so the count is the only thing that does.
     let mut bytes = Vec::new();
-    serialize(Full::new(), &mut bytes, &One::new(7u8)).unwrap();
+    serialize(full(), &mut bytes, &One::new(7u8)).unwrap();
     assert_eq!(bytes, b"\x01\x41\x01\x07");
 }
 
@@ -275,7 +287,7 @@ fn an_enum_variant_passes_it_on() {
 fn a_value_of_its_own_keeps_its_length() {
     // Nothing encloses a top-level value, so it has to state its own length.
     let mut bytes = Vec::new();
-    serialize(Full::new(), &mut bytes, &"temp".to_string()).unwrap();
+    serialize(full(), &mut bytes, &"temp".to_string()).unwrap();
     assert_eq!(bytes, b"\x04temp");
 
     unaffected(&"temp".to_string());
@@ -287,11 +299,11 @@ fn nothing_is_read_beyond_the_value() {
     // the input: a reader may well hold more than this one value.
     for value in ["temp".to_string(), String::new()] {
         let mut bytes = Vec::new();
-        serialize(Full::new(), &mut bytes, &value).unwrap();
+        serialize(full(), &mut bytes, &value).unwrap();
         bytes.extend_from_slice(b"and more");
 
         let mut input = bytes.as_slice();
-        let back: String = deserialize(Full::new(), &mut input).unwrap();
+        let back: String = deserialize(full(), &mut input).unwrap();
 
         assert_eq!(back, value);
         assert_eq!(input, b"and more", "the reader was advanced past the value");
@@ -299,11 +311,11 @@ fn nothing_is_read_beyond_the_value() {
 
     // The same for a string that does leave out its length.
     let mut bytes = Vec::new();
-    serialize(Full::new(), &mut bytes, &One::new("temp".to_string())).unwrap();
+    serialize(full(), &mut bytes, &One::new("temp".to_string())).unwrap();
     bytes.extend_from_slice(b"and more");
 
     let mut input = bytes.as_slice();
-    let back: One<String> = deserialize(Full::new(), &mut input).unwrap();
+    let back: One<String> = deserialize(full(), &mut input).unwrap();
 
     assert_eq!(back.v, "temp");
     assert_eq!(input, b"and more", "the reader was advanced past the value");
@@ -323,7 +335,7 @@ fn slim_is_unaffected() {
     let mut written = Vec::new();
 
     for version in [Version::Postbag1, Version::Postbag0_4] {
-        let cfg = Slim::new().with_version(version);
+        let cfg = slim().with_version(version);
         let mut bytes = Vec::new();
         serialize(cfg, &mut bytes, &value).unwrap();
         let back: Reading = deserialize(cfg, bytes.as_slice()).unwrap();
@@ -394,8 +406,8 @@ fn slim_needs_its_count_because_a_field_can_be_empty() {
         b: (),
     }
 
-    let bytes = postbag::to_vec(Slim::new(), &Units { a: (), b: () }).unwrap();
-    let back: Units = deserialize(Slim::new(), bytes.as_slice()).unwrap();
+    let bytes = postbag::to_vec(slim(), &Units { a: (), b: () }).unwrap();
+    let back: Units = deserialize(slim(), bytes.as_slice()).unwrap();
 
     assert_eq!(back, Units { a: (), b: () });
     assert_eq!(bytes, b"\x02\x00", "the count is all there is");
@@ -412,14 +424,14 @@ fn slim_needs_its_count_because_a_field_can_be_empty() {
         a: u32,
     }
 
-    let marked = postbag::to_vec(Slim::new(), &Marked { a: 300, marker: PhantomData }).unwrap();
-    let unmarked = postbag::to_vec(Slim::new(), &Unmarked { a: 300 }).unwrap();
+    let marked = postbag::to_vec(slim(), &Marked { a: 300, marker: PhantomData }).unwrap();
+    let unmarked = postbag::to_vec(slim(), &Unmarked { a: 300 }).unwrap();
 
     assert_eq!(marked, b"\x02\x02\xac\x02");
     assert_eq!(unmarked, b"\x01\x02\xac\x02");
     assert_eq!(marked[1..], unmarked[1..], "only the count tells them apart");
 
-    let err = postbag::from_slice::<Marked, _>(Slim::new(), unmarked.as_slice()).unwrap_err();
+    let err = postbag::from_slice::<Marked, _>(slim(), unmarked.as_slice()).unwrap_err();
     assert!(err.to_string().contains("invalid length"), "got {err}");
 }
 

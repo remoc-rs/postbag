@@ -8,8 +8,9 @@ Postbag encodes one schema-defined value as a byte sequence. The schema determin
 type and structure of every value; type information is not included in the encoded data.
 Record fields and variant tags carry identifiers.
 
-The format does not define transport framing, a version marker, compression, encryption,
-or checksums. The [Postbag Slim format](POSTBAG-SLIM.md) is outside the scope of this
+A document begins with a header stating the version of the data format, as specified in
+Section 8.1. The format does not define transport framing, compression, encryption, or
+checksums. The [Postbag Slim format](POSTBAG-SLIM.md) is outside the scope of this
 document.
 
 The key words **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are to be interpreted as
@@ -162,13 +163,15 @@ A decoder MUST reject a reserved identifier code.
 
 The following values are block-final:
 
-1. the value of every record field; and
+1. the value of every record field;
 2. every variant payload, either in an enclosing block or in a block introduced by the
-   variant tag.
+   variant tag; and
+3. the value inside a block introduced for a recoverable value, as specified in
+   Section 7.9.
 
-Block-final position propagates through an optional value that is present and through a
-transparent wrapper. It does not propagate into tuples, sequences, maps, or tuple-variant
-fields.
+Block-final position propagates through an optional value that is present, through a
+transparent wrapper, and through a recoverable value that introduces no block of its own.
+It does not propagate into tuples, sequences, maps, or tuple-variant fields.
 
 Block-final position changes these encodings:
 
@@ -204,7 +207,8 @@ any other discriminant.
 ### 7.3 Transparent wrappers
 
 A transparent wrapper contributes no bytes. Its contained value is encoded in its place
-and inherits block-final position.
+and inherits block-final position. A recoverable value, specified in Section 7.9, is a
+transparent wrapper that is in addition bounded by a block where nothing else bounds it.
 
 ### 7.4 Tuples and fixed-size arrays
 
@@ -312,20 +316,88 @@ map(K, V) := 7d 00 block((01 value(K, false) value(V, false))* 00)
 Within the block, `0x01` announces a key-value pair and `0x00` terminates the map. A decoder
 MUST reject any other announcement byte.
 
+### 7.9 Recoverable values
+
+A recoverable value is bounded so that a decoder that fails to decode it can step over it
+and continue with the values that follow, instead of abandoning the enclosing value as
+well:
+
+```
+recoverable(T) := value(T, true)          ; block-final
+                | block(value(T, true))   ; otherwise
+```
+
+In block-final position the enclosing block already bounds the value, so no block is
+introduced and the encoding is the one the value has without the wrapper. Everywhere else
+a block is introduced and the value is block-final within it.
+
+The schema states which values are recoverable. The encoding carries no mark of its own,
+so an encoder and a decoder MUST agree on which values these are.
+
+A decoder that fails to decode a recoverable value MUST close every block it opened while
+decoding that value, up to and including the block introduced here, and MAY then
+substitute a value of its own choosing. A decoder MUST NOT substitute a value when the
+failure leaves the position of the following data unknown, as it does when the underlying
+byte source fails; it MUST report such a failure instead.
+
 ## 8. Document encoding
 
-A Postbag document is the encoding of exactly one value:
+### 8.1 Header
+
+A document begins with a two-byte header stating the version of the data format and
+whether identifiers are serialized:
 
 ```
-document := value(root_type, false)
+header := ba flags
 ```
 
-The root value is not block-final. No header, version marker, byte length, or terminator is
-included.
+The bits of `flags` are:
+
+| Bits | Name | Value |
+| --- | --- | --- |
+| 7-5 | fixed | `0b101` |
+| 4 | identifiers | `1` in this format |
+| 3-0 | version | `1` for version 1.0 |
+
+In version 1.0 of this format the header is therefore `ba b1`.
+
+No UTF-8 encoded text begins with `0xba`, so text presented to a decoder in place of a
+document is always rejected rather than misread.
+
+Version `0` identifies Postbag 0.4 and earlier, which has no header, and version `15` is
+reserved to introduce an extended version encoding. An encoder MUST NOT write either as
+the version.
+
+A decoder MUST reject a document whose first byte is not `0xba`, whose fixed bits are not
+`0b101`, whose version it does not implement, or whose identifiers bit does not match the
+format it decodes. The identifiers bit is `0` in the
+[Postbag Slim format](POSTBAG-SLIM.md), so the header tells the two formats apart.
+
+### 8.2 Root value
+
+A Postbag document is a header followed by the encoding of exactly one value:
+
+```
+document := header value(root_type, false)
+```
+
+The root value is not block-final. No byte length or terminator is included.
+
+An encoder SHOULD write the header. It MAY omit it where the format and the version are
+agreed out of band, as when a connection settles them once and then carries many small
+documents; a document is then the root value alone, and a decoder MUST be told beforehand
+that no header precedes it. Data written without a header cannot be told apart from data
+of another format or another version afterward.
 
 ## 9. Grammar summary
 
 ```
+document              := header value(root_type, false)
+
+header                := ba flags                              ; flags = 0b101 <idents:1>
+                                                               ;               <version:4>
+                                                               ; ba b1 in version 1.0
+
 value(T, final):
   boolean             := 00 | 01
   uint8               := <byte>
@@ -342,6 +414,8 @@ value(T, final):
   unit                := ε
   option(T)           := 00 | 01 value(T, final)
   transparent(T)      := value(T, final)
+  recoverable(T)      := final ? value(T, true)
+                               : block(value(T, true))
   tuple(T1..Tn)       := value(T1, false) ... value(Tn, false)
   array(T, n)         := value(T, false)^n
   sequence(T)         := count(n) value(T, false)^n

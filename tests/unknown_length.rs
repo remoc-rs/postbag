@@ -13,8 +13,30 @@ use serde::{Deserialize, Serialize, Serializer, de::DeserializeOwned};
 use postbag::{
     Error,
     cfg::{Cfg, Full, Slim},
-    from_full_slice, to_full_vec, to_slim_vec,
+    to_vec,
 };
+
+/// The bytes stated below are the framing of the value alone, so nothing here
+/// writes or expects the header a stream otherwise begins with.
+fn full_cfg() -> Full {
+    Full::new().with_header(false)
+}
+
+fn slim_cfg() -> Slim {
+    Slim::new().with_header(false)
+}
+
+fn to_full_vec<T: serde::Serialize + ?Sized>(value: &T) -> postbag::Result<Vec<u8>> {
+    to_vec(full_cfg(), value)
+}
+
+fn to_slim_vec<T: serde::Serialize + ?Sized>(value: &T) -> postbag::Result<Vec<u8>> {
+    to_vec(slim_cfg(), value)
+}
+
+fn from_full_slice<T: serde::de::DeserializeOwned>(slice: &[u8]) -> postbag::Result<T> {
+    postbag::from_slice(full_cfg(), slice)
+}
 
 /// Serializes an iterator, which is what reaches the uncounted path.
 struct Uncounted<I>(RefCell<Option<I>>);
@@ -72,10 +94,10 @@ where
     assert!(full.starts_with(&[0x7d, 0x00]), "expected the uncounted path, got {full:02x?}");
     assert_eq!(full, slim, "the uncounted path does not depend on identifiers");
 
-    let back: R = postbag::from_slice(Full::new(), full.as_slice()).expect("full deserialization");
+    let back: R = postbag::from_slice(full_cfg(), full.as_slice()).expect("full deserialization");
     assert_eq!(back, *expected);
 
-    let back: R = postbag::from_slice(Slim::new(), slim.as_slice()).expect("slim deserialization");
+    let back: R = postbag::from_slice(slim_cfg(), slim.as_slice()).expect("slim deserialization");
     assert_eq!(back, *expected);
 }
 
@@ -159,7 +181,7 @@ fn a_counted_sequence_is_unchanged() {
         v: Vec<u32>,
     }
 
-    for cfg in [Full::new(), Full::new().with_version(postbag::cfg::Version::Postbag0_4)] {
+    for cfg in [full_cfg(), full_cfg().with_version(postbag::cfg::Version::Postbag0_4)] {
         let value = Holder { v: vec![1, 2, 3] };
         let bytes = postbag::to_vec(cfg, &value).unwrap();
         let back: Holder = postbag::from_slice(cfg, bytes.as_slice()).unwrap();
@@ -176,7 +198,7 @@ fn a_counted_sequence_is_unchanged() {
 // --------------------------------------------------------------------------
 
 /// 0.4 announced nothing and ended the sequence where its block ran out.
-const LEGACY: Cfg<true> = Full::new().with_version(postbag::cfg::Version::Postbag0_4);
+const LEGACY: Cfg<true> = Full::new().with_header(false).with_version(postbag::cfg::Version::Postbag0_4);
 
 #[test]
 fn the_legacy_framing_is_what_0_4_wrote() {
@@ -193,7 +215,7 @@ fn what_0_4_wrote_is_read_back() {
     let old = [0x7du8, 0x00, 0x03, 0x01, 0x00, 0x00];
 
     assert_eq!(postbag::from_slice::<Vec<u8>, _>(LEGACY, old.as_slice()).unwrap(), vec![1, 0, 0]);
-    assert_eq!(postbag::from_full_slice::<Vec<u8>>(&old).unwrap(), vec![0], "the reason the setting exists");
+    assert_eq!(from_full_slice::<Vec<u8>>(&old).unwrap(), vec![0], "the reason the setting exists");
 }
 
 #[test]

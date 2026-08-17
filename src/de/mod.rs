@@ -54,11 +54,19 @@ mod skippable;
 /// let bytes = to_vec(cfg, &person).unwrap();
 /// let deserialized: Person = deserialize(cfg, bytes.as_slice()).unwrap();
 /// ```
-pub fn deserialize<R, T, const WITH_IDENTS: bool>(cfg: Cfg<WITH_IDENTS>, read: R) -> Result<T>
+pub fn deserialize<R, T, const WITH_IDENTS: bool>(cfg: Cfg<WITH_IDENTS>, mut read: R) -> Result<T>
 where
     R: std::io::Read,
     T: DeserializeOwned,
 {
+    let cfg = if cfg.header() {
+        let mut header = [0; 2];
+        read.read_exact(&mut header)?;
+        cfg.with_version(crate::cfg::header::parse(header, WITH_IDENTS)?)
+    } else {
+        cfg
+    };
+
     let mut deserializer = Deserializer::<R, WITH_IDENTS>::new(read, cfg);
     let t = T::deserialize(&mut deserializer)?;
     deserializer.finalize();

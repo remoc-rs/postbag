@@ -43,6 +43,16 @@ impl List {
     }
 }
 
+/// The hand-written inputs below are the value alone, so they are read with
+/// configurations that expect no header.
+fn headerless_full() -> Full {
+    Full::new().with_header(false)
+}
+
+fn headerless_slim() -> Slim {
+    Slim::new().with_header(false)
+}
+
 /// Hostile input: a long run of `Node` variant tags in slim encoding.
 fn hostile_slim(depth: usize) -> Vec<u8> {
     let mut bytes = vec![1u8; depth];
@@ -96,7 +106,8 @@ fn the_hostile_input_is_what_the_writer_writes() {
     // Without this the test below could pass on input the reader turns down for
     // a reason that has nothing to do with the depth limit.
     for depth in 1..8 {
-        assert_eq!(hostile_full(depth), to_full_vec(&Tree::nested(depth)).unwrap(), "at depth {depth}");
+        let written = to_vec(headerless_full(), &Tree::nested(depth)).unwrap();
+        assert_eq!(hostile_full(depth), written, "at depth {depth}");
     }
 }
 
@@ -110,14 +121,14 @@ fn default_depth_limit_is_reachable_from_config() {
 
 #[test]
 fn deeply_nested_input_is_rejected_slim() {
-    let res: Result<Tree, _> = from_slim_slice(&hostile_slim(1_000_000));
+    let res: Result<Tree, _> = from_slice(headerless_slim(), &hostile_slim(1_000_000));
     assert!(matches!(res, Err(Error::RecursionLimit)), "expected recursion limit error, got {res:?}");
 }
 
 #[test]
 fn deeply_nested_input_is_rejected_full() {
     // Far beyond the limit, and as deep as one chunk per level can express.
-    let res: Result<Tree, _> = from_full_slice(&hostile_full(4_000));
+    let res: Result<Tree, _> = from_slice(headerless_full(), &hostile_full(4_000));
     assert!(matches!(res, Err(Error::RecursionLimit)), "expected recursion limit error, got {res:?}");
 }
 

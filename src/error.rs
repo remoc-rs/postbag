@@ -26,6 +26,20 @@ pub enum Error {
     BadIdentifier,
     /// Recursion limit exceeded while (de-)serializing deeply nested data
     RecursionLimit,
+    /// The data does not begin with a Postbag header
+    ///
+    /// Either it is no Postbag data at all, or it was serialized without a
+    /// header; see [`Cfg::with_header`](crate::cfg::Cfg::with_header).
+    BadHeader,
+    /// The header states a version of the data format that is not supported
+    UnsupportedVersion(u8),
+    /// The header states that identifiers are serialized where none are
+    /// expected, or the other way around
+    ///
+    /// Holds whether the data contains identifiers, so it was serialized
+    /// using [`Full`](crate::cfg::Full) where [`Slim`](crate::cfg::Slim) was
+    /// expected, or the other way around.
+    WithIdentsMismatch(bool),
     /// Overflow of target usize
     UsizeOverflow,
     /// Serde custom error
@@ -71,6 +85,14 @@ impl Display for Error {
             BadOption => write!(f, "invalid option"),
             BadIdentifier => write!(f, "invalid identifier"),
             RecursionLimit => write!(f, "recursion limit exceeded"),
+            BadHeader => write!(f, "data does not begin with a Postbag header"),
+            UnsupportedVersion(version) => write!(f, "unsupported Postbag data format version {version}"),
+            WithIdentsMismatch(true) => {
+                write!(f, "data was serialized with identifiers, but none are expected")
+            }
+            WithIdentsMismatch(false) => {
+                write!(f, "data was serialized without identifiers, but they are expected")
+            }
             BadEnum => write!(f, "invalid enum discriminant"),
             BadLen => write!(f, "invalid length"),
             UsizeOverflow => write!(f, "usize overflow"),

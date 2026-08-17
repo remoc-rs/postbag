@@ -2,6 +2,64 @@
 
 use std::fmt;
 
+/// The header a stream begins with.
+///
+/// Two bytes: a magic byte, then one holding a fixed bit pattern, whether
+/// identifiers are serialized, and the version of the data format.
+///
+/// ```text
+///  byte 0     byte 1
+/// ┌────────┐ ┌───┬───┬───┬───┬───┬───┬───┬───┐
+/// │  0xba  │ │ 1 │ 0 │ 1 │ I │ v │ v │ v │ v │
+/// └────────┘ └───┴───┴───┴───┴───┴───┴───┴───┘
+///              fixed      │    version
+///                         └ identifiers
+/// ```
+pub(crate) mod header {
+    use super::Version;
+    use crate::error::{Error, Result};
+
+    /// First byte, identifying the data as Postbag.
+    const MAGIC: u8 = 0xba;
+
+    /// Bits of the second byte that are always the same, and their value.
+    const FIXED_MASK: u8 = 0b1110_0000;
+    const FIXED: u8 = 0b1010_0000;
+
+    /// Bit of the second byte stating whether identifiers are serialized.
+    const IDENTS: u8 = 0b0001_0000;
+
+    /// Bits of the second byte stating the version of the data format.
+    ///
+    /// Version 15 is reserved to state that an extended version follows.
+    const VERSION_MASK: u8 = 0b0000_1111;
+
+    /// The header stating the version of the data format and whether
+    /// identifiers are serialized.
+    pub(crate) const fn bytes(version: Version, with_idents: bool) -> [u8; 2] {
+        let idents = if with_idents { IDENTS } else { 0 };
+        [MAGIC, FIXED | idents | version.as_u8()]
+    }
+
+    /// Reads the header, returning the version of the data format it states.
+    pub(crate) fn parse(bytes: [u8; 2], with_idents: bool) -> Result<Version> {
+        if bytes[0] != MAGIC || bytes[1] & FIXED_MASK != FIXED {
+            return Err(Error::BadHeader);
+        }
+
+        let data_has_idents = bytes[1] & IDENTS != 0;
+        if data_has_idents != with_idents {
+            return Err(Error::WithIdentsMismatch(data_has_idents));
+        }
+
+        let version = bytes[1] & VERSION_MASK;
+        match Version::try_from(version) {
+            Ok(version) if !version.is_0_4() => Ok(version),
+            _ => Err(Error::UnsupportedVersion(version)),
+        }
+    }
+}
+
 /// Default limit for the nesting depth of serialized and deserialized data.
 ///
 /// Serialization and deserialization of nested data is recursive, so deeply
@@ -35,15 +93,20 @@ impl Version {
     pub(crate) const fn is_0_4(self) -> bool {
         matches!(self, Self::Postbag0_4)
     }
+
+    /// The byte identifying this version.
+    const fn as_u8(self) -> u8 {
+        match self {
+            Version::Postbag0_4 => 0,
+            Version::Postbag1 => 1,
+        }
+    }
 }
 
 /// Identifies the version by a byte.
 impl From<Version> for u8 {
     fn from(version: Version) -> Self {
-        match version {
-            Version::Postbag0_4 => 0,
-            Version::Postbag1 => 1,
-        }
+        version.as_u8()
     }
 }
 
@@ -89,6 +152,7 @@ impl std::error::Error for UnknownVersion {}
 pub struct Cfg<const WITH_IDENTS: bool> {
     depth_limit: usize,
     version: Version,
+    header: bool,
 }
 
 impl<const WITH_IDENTS: bool> Cfg<WITH_IDENTS> {
@@ -99,7 +163,7 @@ impl<const WITH_IDENTS: bool> Cfg<WITH_IDENTS> {
 
     /// Creates a new configuration using default values.
     pub const fn new() -> Self {
-        Self { depth_limit: DEFAULT_DEPTH_LIMIT, version: Version::Postbag1 }
+        Self { depth_limit: DEFAULT_DEPTH_LIMIT, version: Version::Postbag1, header: true }
     }
 
     /// Whether struct field identifiers and enum variant identifiers
@@ -114,15 +178,6 @@ impl<const WITH_IDENTS: bool> Cfg<WITH_IDENTS> {
     /// [`Error::RecursionLimit`](crate::Error::RecursionLimit).
     ///
     /// Defaults to [`DEFAULT_DEPTH_LIMIT`].    
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use postbag::cfg::Slim;
-    ///
-    /// let cfg = Slim::new().with_depth_limit(1024);
-    /// assert_eq!(cfg.depth_limit(), 1024);
-    /// ```
     pub const fn with_depth_limit(self, depth_limit: usize) -> Self {
         Self { depth_limit, ..self }
     }
@@ -131,23 +186,39 @@ impl<const WITH_IDENTS: bool> Cfg<WITH_IDENTS> {
     ///
     /// Both ends must use the same version.
     ///
-    /// Defaults to [`Version::Postbag1`].
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use postbag::cfg::{Full, Version};
-    ///
-    /// let cfg = Full::new().with_version(Version::Postbag0_4);
-    /// assert_eq!(cfg.version(), Version::Postbag0_4);
-    /// ```
+    /// Defaults to this Postbag version.
     pub const fn with_version(self, version: Version) -> Self {
         Self { version, ..self }
+    }
+
+    /// Sets whether the data begins with a header stating the version of the
+    /// data format and whether identifiers are serialized.
+    ///
+    /// A headers enables a future version of Postbag to auto-detect the version
+    /// used for serializing the data. Otherwise the deserializer must be configured
+    /// to use the same version using [`with_version`](Self::with_version).
+    ///
+    /// Headers are always disabled for Postbag 0.4.
+    ///
+    /// Defaults to `true`.
+    pub const fn with_header(self, header: bool) -> Self {
+        Self { header, ..self }
     }
 
     /// The limit for the nesting depth of serialized and deserialized data.
     pub const fn depth_limit(&self) -> usize {
         self.depth_limit
+    }
+
+    /// Whether the data begins with a header stating the version of the data
+    /// format and whether identifiers are serialized.
+    pub const fn header(&self) -> bool {
+        self.header && !self.version().is_0_4()
+    }
+
+    /// The header this configuration writes.
+    pub(crate) const fn header_bytes(&self) -> [u8; 2] {
+        header::bytes(self.version, WITH_IDENTS)
     }
 
     /// The version of the data format.
@@ -168,6 +239,7 @@ impl<const WITH_IDENTS: bool> fmt::Debug for Cfg<WITH_IDENTS> {
             .field("with_idents", &WITH_IDENTS)
             .field("depth_limit", &self.depth_limit)
             .field("version", &self.version)
+            .field("header", &self.header())
             .finish()
     }
 }

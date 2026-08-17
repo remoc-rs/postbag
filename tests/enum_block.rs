@@ -19,8 +19,26 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use postbag::{
     Error,
     cfg::{Full, Slim, Version},
-    deserialize, from_full_slice, to_full_vec, to_vec,
+    deserialize, to_vec,
 };
+
+/// The bytes stated below are the framing of the value alone, so nothing here
+/// writes or expects the header a stream otherwise begins with.
+fn full() -> Full {
+    Full::new().with_header(false)
+}
+
+fn slim() -> Slim {
+    Slim::new().with_header(false)
+}
+
+fn to_full_vec<T: Serialize + ?Sized>(value: &T) -> postbag::Result<Vec<u8>> {
+    to_vec(full(), value)
+}
+
+fn from_full_slice<T: DeserializeOwned>(slice: &[u8]) -> postbag::Result<T> {
+    postbag::from_slice(full(), slice)
+}
 
 /// Puts a value in a field, where it reaches the end of a block.
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -122,7 +140,7 @@ fn a_top_level_variant_is_self_delimiting() {
     bytes.extend_from_slice(b"and more");
 
     let mut input = bytes.as_slice();
-    let back: Shape = deserialize(Full::new(), &mut input).unwrap();
+    let back: Shape = deserialize(full(), &mut input).unwrap();
 
     assert_eq!(back, Shape::Num(5));
     assert_eq!(input, b"and more", "the reader was advanced past the value");
@@ -206,7 +224,7 @@ fn an_unknown_payload_is_skipped_at_the_top_level() {
     let bytes = to_full_vec(&New::C(7)).unwrap();
 
     let mut input = bytes.as_slice();
-    let back: Old = deserialize(Full::new(), &mut input).unwrap();
+    let back: Old = deserialize(full(), &mut input).unwrap();
 
     assert_eq!(back, Old::Unknown);
     assert!(input.is_empty(), "the payload was left in the input, got {input:02x?}");
@@ -340,13 +358,13 @@ fn a_payload_that_is_not_there_is_refused() {
 #[test]
 fn slim_is_unaffected() {
     // `Slim` writes variant indices and has no identifiers to hide a flag in.
-    let bytes = to_vec(Slim::new(), &Wrap { v: vec![Shape::Num(5)] }).unwrap();
+    let bytes = to_vec(slim(), &Wrap { v: vec![Shape::Num(5)] }).unwrap();
     assert_eq!(bytes, b"\x01\x03\x01\x01\x05");
 
-    let bytes = to_vec(Slim::new(), &Wrap { v: Shape::Rec { w: 2, h: 3 } }).unwrap();
+    let bytes = to_vec(slim(), &Wrap { v: Shape::Rec { w: 2, h: 3 } }).unwrap();
     assert_eq!(bytes, b"\x01\x05\x03\x02\x02\x02\x03");
 
-    let back: Wrap<Shape> = postbag::from_slice(Slim::new(), &bytes).unwrap();
+    let back: Wrap<Shape> = postbag::from_slice(slim(), &bytes).unwrap();
     assert_eq!(back.v, Shape::Rec { w: 2, h: 3 });
 }
 
