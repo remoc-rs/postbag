@@ -18,6 +18,9 @@ To be compatible with Postbag 0.4 use `cfg::Version::Postbag0_4`.
   replacing the `Cfg` trait and its type parameter.
 - Added a limit on the nesting depth of serialized and deserialized data,
   defaulting to `cfg::DEFAULT_DEPTH_LIMIT` (128).
+- Recoverable deserialization via recoverable module allows replacements
+  of values that failed deserialization either by their default or custom
+  replacement values.
 - Minimum supported Rust version (MSRV) is 1.95
 
 ## 0.4.3
