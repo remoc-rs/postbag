@@ -19,7 +19,7 @@ fn bare_slim<T: Serialize + ?Sized>(value: &T) -> Vec<u8> {
     to_vec(Slim::new().with_header(false), value).unwrap()
 }
 
-#[derive(Default, Serialize)]
+#[derive(Default, Serialize, Deserialize)]
 struct B {
     x: u32,
     y: String,
@@ -39,14 +39,14 @@ impl Recover<B> for OtherPolicy {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct Plain {
     a: u32,
     b: B,
     c: u16,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct Wrapped {
     a: u32,
     b: Recoverable<B>,
@@ -90,6 +90,58 @@ fn wrapped() -> Wrapped {
 #[test]
 fn full_field_representation_is_unchanged() {
     assert_eq!(to_full_vec(&plain()).unwrap(), to_full_vec(&wrapped()).unwrap());
+}
+
+/// An enum variant payload is enclosed in a block just as a field value is,
+/// whether the enum sits at the top level or inside a field, so wrapping one
+/// leaves the representation unchanged as well.
+#[test]
+fn full_variant_payload_representation_is_unchanged() {
+    #[derive(Serialize)]
+    enum Plain {
+        V(B),
+    }
+
+    #[derive(Serialize)]
+    enum Wrapped {
+        V(Recoverable<B>),
+    }
+
+    #[derive(Serialize)]
+    struct HoldsPlain {
+        e: Plain,
+        tail: u8,
+    }
+
+    #[derive(Serialize)]
+    struct HoldsWrapped {
+        e: Wrapped,
+        tail: u8,
+    }
+
+    assert_eq!(to_full_vec(&Plain::V(b())).unwrap(), to_full_vec(&Wrapped::V(Recoverable::new(b()))).unwrap());
+
+    assert_eq!(
+        to_full_vec(&HoldsPlain { e: Plain::V(b()), tail: 9 }).unwrap(),
+        to_full_vec(&HoldsWrapped { e: Wrapped::V(Recoverable::new(b())), tail: 9 }).unwrap()
+    );
+}
+
+/// What is written before a field is wrapped is read back after, and the other
+/// way around, which is what makes the wrapper safe to add to a type in use.
+#[test]
+fn full_reads_across_the_change() {
+    let plain = to_full_vec(&plain()).unwrap();
+    let wrapped = to_full_vec(&wrapped()).unwrap();
+
+    let read: Wrapped = from_full_slice(&plain).unwrap();
+    assert_eq!(read.a, 1);
+    assert_eq!(read.c, 2);
+    assert!(!Recoverable::is_recovered(&read.b));
+
+    let read: Plain = from_full_slice(&wrapped).unwrap();
+    assert_eq!(read.a, 1);
+    assert_eq!(read.c, 2);
 }
 
 /// `Slim` encloses nothing, so the block has to be added there.

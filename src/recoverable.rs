@@ -86,6 +86,42 @@
 //! exchange for the unchanged field type they lose the ability to tell whether
 //! recovery took place, which [`Recoverable::is_recovered`] provides.
 //!
+//! # Retrofitting recoverability to an existing type
+//!
+//! Under [`Full`](crate::cfg::Full) a struct field can be wrapped without
+//! changing the serialized representation, so data written before the change
+//! is still read after it:
+//!
+//! ```rust
+//! # use serde::{Serialize, Deserialize};
+//! # #[derive(Default, Serialize, Deserialize)]
+//! # struct B { x: u32 }
+//! use postbag::recoverable::Recoverable;
+//!
+//! #[derive(Serialize, Deserialize)]
+//! struct Before {
+//!     a: u32,
+//!     b: B,
+//!     c: u16,
+//! }
+//!
+//! #[derive(Serialize, Deserialize)]
+//! struct After {
+//!     a: u32,
+//!     b: Recoverable<B>, // the only change
+//!     c: u16,
+//! }
+//!
+//! let bytes = postbag::to_full_vec(&Before { a: 1, b: B { x: 7 }, c: 2 })?;
+//! let after: After = postbag::from_full_slice(&bytes)?;
+//! assert_eq!(after.b.x, 7);
+//! # Ok::<(), postbag::Error>(())
+//! ```
+//!
+//! The same holds for the payload of an enum variant, `V(B)` becoming
+//! `V(Recoverable<B>)`.
+//!
+//!
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Visitor};
 use std::{
