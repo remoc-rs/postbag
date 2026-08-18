@@ -14,6 +14,7 @@ pub mod fixint;
 mod id;
 pub mod recoverable;
 mod ser;
+pub mod varfloat;
 mod varint;
 
 const FALSE: u8 = 0;

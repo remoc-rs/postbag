@@ -12,6 +12,7 @@ use postbag::{
     deserialize,
     fixint::Fixint,
     serialize,
+    varfloat::Varfloat,
 };
 
 /// Performs serialization followed by deserialization and checks that the
@@ -871,11 +872,11 @@ fn fixed_int() {
 #[test]
 fn fixed_int_wrapper() {
     #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
-    pub struct WrappedLE {
+    pub struct WrappedFixint {
         x: Fixint<u16>,
     }
 
-    loopback(WrappedLE { x: Fixint(0xABCD) });
+    loopback(WrappedFixint { x: Fixint(0xABCD) });
 
     // The wrapper reaches into containers, which the attribute cannot.
     loopback(vec![Fixint(1_u32), Fixint(u32::MAX), 3.into()]);
@@ -891,7 +892,7 @@ fn fixed_int_wrapper() {
     let mut by_attr = Vec::new();
     serialize(Slim::new(), &mut by_attr, &AttrLE { x: 0xABCD }).unwrap();
     let mut by_wrapper = Vec::new();
-    serialize(Slim::new(), &mut by_wrapper, &WrappedLE { x: Fixint(0xABCD) }).unwrap();
+    serialize(Slim::new(), &mut by_wrapper, &WrappedFixint { x: Fixint(0xABCD) }).unwrap();
     assert_eq!(by_attr, by_wrapper);
 }
 
@@ -976,4 +977,233 @@ fn serde_alias_compat() {
         deserialize(Full::new(), serialized.as_slice()).expect("deserialization with alias failed");
     assert_eq!(new.gain, old.gain);
     assert_eq!(new.time_usec, old.time_100usec);
+}
+
+// =============================================================================
+// Variable float encoding
+// =============================================================================
+
+/// A float that can be compared by its bit pattern, since NaN is not equal to
+/// itself and zero is equal to negative zero.
+trait FloatBits: Copy + Debug {
+    fn bits(self) -> u128;
+}
+
+impl FloatBits for f32 {
+    fn bits(self) -> u128 {
+        self.to_bits().into()
+    }
+}
+
+impl FloatBits for f64 {
+    fn bits(self) -> u128 {
+        self.to_bits().into()
+    }
+}
+
+/// Serializes the value, checks the encoded length and that it deserializes
+/// back to the same bit pattern.
+#[track_caller]
+fn varfloat_loopback<T>(value: T, len: usize)
+where
+    T: FloatBits,
+    Varfloat<T>: Serialize + DeserializeOwned,
+{
+    let cfg = Slim::new().with_header(false);
+
+    let mut serialized = Vec::new();
+    serialize(cfg, &mut serialized, &Varfloat(value)).expect("serialization failed");
+    assert_eq!(serialized.len(), len, "{value:?} was encoded as {serialized:02x?}");
+
+    let deserialized: Varfloat<T> = deserialize(cfg, serialized.as_slice()).expect("deserialization failed");
+
+    assert_eq!(value.bits(), deserialized.0.bits(), "{value:?} did not survive the loopback");
+}
+
+#[test]
+fn var_float_sizes() {
+    // The sizes stated in the module documentation.
+    varfloat_loopback(0.0_f64, 1);
+    varfloat_loopback(1.0_f64, 3);
+    varfloat_loopback(-0.5_f64, 3);
+    varfloat_loopback(f64::INFINITY, 3);
+    varfloat_loopback(f64::NAN, 3);
+    varfloat_loopback(-32768.0_f64 / 32768.0, 3);
+    varfloat_loopback(-0.0_f64, 2);
+    varfloat_loopback(1234.0_f64 / 32768.0, 4);
+    varfloat_loopback(0.1_f64, 9);
+    varfloat_loopback(std::f64::consts::PI, 9);
+
+    varfloat_loopback(0.0_f32, 1);
+    varfloat_loopback(1.0_f32, 3);
+    varfloat_loopback(-0.5_f32, 2);
+    varfloat_loopback(f32::INFINITY, 3);
+    varfloat_loopback(f32::NAN, 3);
+    varfloat_loopback(1234.0_f32 / 32768.0, 4);
+    varfloat_loopback(0.1_f32, 5);
+    varfloat_loopback(std::f32::consts::PI, 5);
+}
+
+#[test]
+fn var_float_bit_patterns() {
+    // Every bit pattern is preserved, without normalization.
+    varfloat_loopback(-0.0_f64, 2);
+    varfloat_loopback(f64::NEG_INFINITY, 3);
+    varfloat_loopback(f64::MIN_POSITIVE, 3);
+    varfloat_loopback(f32::MIN_POSITIVE, 3);
+    varfloat_loopback(f64::from_bits(1), 9);
+    varfloat_loopback(f64::MIN, 9);
+    varfloat_loopback(f64::MAX, 9);
+
+    // A signaling NaN keeps its payload and is not turned into a quiet NaN.
+    let signaling = f64::from_bits(0x7ff0_0000_0000_0001);
+    assert!(signaling.is_nan());
+    varfloat_loopback(signaling, 9);
+
+    varfloat_loopback(-0.0_f32, 2);
+    varfloat_loopback(f32::NEG_INFINITY, 3);
+    varfloat_loopback(f32::from_bits(1), 5);
+    varfloat_loopback(f32::MIN, 5);
+    varfloat_loopback(f32::MAX, 5);
+}
+
+#[test]
+fn var_float_attribute() {
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
+    pub struct DefinitelyVarfloat {
+        #[serde(with = "postbag::varfloat")]
+        x: f64,
+    }
+
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
+    pub struct WrappedVarfloat {
+        x: Varfloat<f64>,
+    }
+
+    // The wrapper and the attribute produce the same encoding.
+    let mut by_attr = Vec::new();
+    serialize(Slim::new(), &mut by_attr, &DefinitelyVarfloat { x: 0.25 }).unwrap();
+    let mut by_wrapper = Vec::new();
+    serialize(Slim::new(), &mut by_wrapper, &WrappedVarfloat { x: Varfloat(0.25) }).unwrap();
+    assert_eq!(by_attr, by_wrapper);
+
+    let back: DefinitelyVarfloat = deserialize(Slim::new(), by_attr.as_slice()).unwrap();
+    assert_eq!(back.x, 0.25);
+}
+
+#[test]
+fn var_float_containers() {
+    // The wrapper reaches into containers, which the attribute cannot.
+    let samples: Vec<Varfloat<f32>> = (-4..4).map(|i| Varfloat(i as f32 / 32768.0)).collect();
+    let mut serialized = Vec::new();
+    serialize(Slim::new(), &mut serialized, &samples).unwrap();
+    let back: Vec<Varfloat<f32>> = deserialize(Slim::new(), serialized.as_slice()).unwrap();
+    assert_eq!(samples, back);
+
+    loopback_generic(Some(Varfloat(0.0_f64)));
+    loopback_generic(None::<Varfloat<f64>>);
+}
+
+/// Loopback for values that are `PartialEq` but not `Eq`.
+#[track_caller]
+fn loopback_generic<T>(value: T)
+where
+    T: Serialize + DeserializeOwned + Debug + PartialEq,
+{
+    let mut serialized = Vec::new();
+    serialize(Slim::new(), &mut serialized, &value).expect("serialization failed");
+    let deserialized: T = deserialize(Slim::new(), serialized.as_slice()).expect("deserialization failed");
+    assert_eq!(value, deserialized);
+}
+
+#[test]
+fn var_float_rejects_non_minimal() {
+    // A trailing zero byte is not the shortest representation.
+    let deser = deserialize::<_, Varfloat<f64>, false>(
+        Slim::new().with_header(false),
+        [0x03, 0x3f, 0xf0, 0x00].as_slice(),
+    );
+    assert!(matches!(deser, Err(Error::Custom(_))), "{deser:?}");
+
+    // More bytes than the value has.
+    let deser = deserialize::<_, Varfloat<f32>, false>(
+        Slim::new().with_header(false),
+        [0x05, 0x3f, 0x80, 0x00, 0x00, 0x01].as_slice(),
+    );
+    assert!(matches!(deser, Err(Error::Custom(_))), "{deser:?}");
+}
+
+#[test]
+fn var_float_all_bit_patterns() {
+    // Every bit pattern must survive, so sample the whole space rather than
+    // just the values that have a name.
+    let mut state = 0x2545_f491_4f6c_dd1d_u64;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+
+    for _ in 0..100_000 {
+        let bits = next();
+        varfloat_bits_loopback(f64::from_bits(bits));
+        varfloat_bits_loopback(f32::from_bits(bits as u32));
+    }
+
+    // Patterns with many trailing zero bits take the short encodings.
+    for shift in 0..64 {
+        varfloat_bits_loopback(f64::from_bits(u64::MAX << shift));
+        varfloat_bits_loopback(f64::from_bits(1 << shift));
+    }
+    for shift in 0..32 {
+        varfloat_bits_loopback(f32::from_bits(u32::MAX << shift));
+        varfloat_bits_loopback(f32::from_bits(1 << shift));
+    }
+}
+
+/// Checks that the value survives a loopback with its bit pattern intact.
+#[track_caller]
+fn varfloat_bits_loopback<T>(value: T)
+where
+    T: FloatBits,
+    Varfloat<T>: Serialize + DeserializeOwned,
+{
+    let cfg = Slim::new().with_header(false);
+
+    let mut serialized = Vec::new();
+    serialize(cfg, &mut serialized, &Varfloat(value)).expect("serialization failed");
+
+    let deserialized: Varfloat<T> = deserialize(cfg, serialized.as_slice()).expect("deserialization failed");
+
+    assert_eq!(value.bits(), deserialized.0.bits(), "{value:?} was encoded as {serialized:02x?}");
+}
+
+#[test]
+fn var_float_block_final() {
+    // In the `Full` configuration a field value is wrapped in a block that
+    // states where it ends, so the length prefix is left out.
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
+    pub struct BlockFinal {
+        x: Varfloat<f64>,
+        y: Varfloat<f32>,
+        z: Option<Varfloat<f64>>,
+    }
+
+    for value in [0.0, -0.0, 1.0, 0.1, f64::NAN, f64::MAX] {
+        let data = BlockFinal { x: Varfloat(value), y: Varfloat(value as f32), z: Some(Varfloat(value)) };
+
+        let mut serialized = Vec::new();
+        serialize(Full::new(), &mut serialized, &data).expect("serialization failed");
+        let back: BlockFinal = deserialize(Full::new(), serialized.as_slice()).expect("deserialization failed");
+
+        assert_eq!(data.x.0.to_bits(), back.x.0.to_bits());
+        assert_eq!(data.y.0.to_bits(), back.y.0.to_bits());
+        assert_eq!(data.z.unwrap().0.to_bits(), back.z.unwrap().0.to_bits());
+    }
+
+    // Without the length prefix a zero occupies no bytes at all.
+    let mut with_len = Vec::new();
+    serialize(Slim::new().with_header(false), &mut with_len, &Varfloat(0.0_f64)).unwrap();
+    assert_eq!(with_len, [0x00]);
 }

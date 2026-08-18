@@ -23,6 +23,7 @@ To be compatible with Postbag 0.4 use `cfg::Version::Postbag0_4`.
   replacement values.
 - Optional header with Postbag version (enabled by default)
 - The `fixint` wrapper type is now public as `fixint::Fixint`
+- Added `varfloat` module for variable length encoding of floating point values
 - Minimum supported Rust version (MSRV) is 1.95
 
 ## 0.4.3
