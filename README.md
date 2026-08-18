@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/postbag/badge.svg)](https://docs.rs/postbag)
 
 Postbag is a compact binary [serde] codec for Rust that keeps the Rust type system
-fully intact and has support for backwards and forwards compatibility.
+fully intact and has support for backwards and forwards compatibility built in.
 
 ## Quick start
 
@@ -67,6 +67,32 @@ The following changes to your types are supported:
 | Reorder variants | yes | no |
 | **Size** | small | even smaller |
 
+
+## Recoverable values
+
+When a value fails to deserialize, the error normally aborts the whole deserialization.
+An incompatible change to one type thus renders every enclosing value undecodable as well.
+
+When using Postbag `Full`, a field annotated with `#[serde(with = "postbag::recoverable")]` 
+confines a deserialization failure to it. The rest is deserialized as usual and the value 
+is replaced by its `Default`.
+
+```rust
+use serde::{Serialize, Deserialize};
+
+# #[derive(Default, Serialize, Deserialize)]
+# struct Details { size: u32 }
+#[derive(Serialize, Deserialize)]
+struct Data {
+    name: String,
+    #[serde(with = "postbag::recoverable")]
+    details: Details,
+    count: u16,
+}
+```
+
+Should `Details` change incompatibly, `name` and `count` still deserialize correctly
+and `details` becomes `Details::default()`.
 
 ## Numbered identifiers
 
