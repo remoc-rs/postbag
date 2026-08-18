@@ -9,7 +9,9 @@ use std::{
 use postbag::{
     Error,
     cfg::{Cfg, Full, Slim},
-    deserialize, serialize,
+    deserialize,
+    fixint::Fixint,
+    serialize,
 };
 
 /// Performs serialization followed by deserialization and checks that the
@@ -864,6 +866,72 @@ fn fixed_int() {
     }
 
     loopback(DefinitelyLE { x: 0xABCD });
+}
+
+#[test]
+fn fixed_int_wrapper() {
+    #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+    pub struct WrappedLE {
+        x: Fixint<u16>,
+    }
+
+    loopback(WrappedLE { x: Fixint(0xABCD) });
+
+    // The wrapper reaches into containers, which the attribute cannot.
+    loopback(vec![Fixint(1_u32), Fixint(u32::MAX), 3.into()]);
+    loopback(Some(Fixint(0x1234_u16)));
+
+    // The wrapper and the attribute produce the same encoding.
+    #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+    pub struct AttrLE {
+        #[serde(with = "postbag::fixint")]
+        x: u16,
+    }
+
+    let mut by_attr = Vec::new();
+    serialize(Slim::new(), &mut by_attr, &AttrLE { x: 0xABCD }).unwrap();
+    let mut by_wrapper = Vec::new();
+    serialize(Slim::new(), &mut by_wrapper, &WrappedLE { x: Fixint(0xABCD) }).unwrap();
+    assert_eq!(by_attr, by_wrapper);
+}
+
+#[test]
+fn fixed_int_widths() {
+    // 8-bit integers are already fixed size, so the wrapper is a no-op.
+    loopback(Fixint(-1_i8));
+    loopback(Fixint(0xAB_u8));
+
+    loopback(vec![Fixint(i128::MIN), Fixint(i128::MAX)]);
+    loopback(vec![Fixint(u128::MIN), Fixint(u128::MAX)]);
+}
+
+#[test]
+fn fixed_int_ptr_width() {
+    loopback(Fixint(0_usize));
+    loopback(Fixint(usize::MAX));
+    loopback(Fixint(0_isize));
+    loopback(Fixint(isize::MIN));
+    loopback(Fixint(isize::MAX));
+
+    // Pointer sized integers occupy 64 bits regardless of the pointer width of
+    // the system, so that the data stays portable.
+    let mut buf = Vec::new();
+    serialize(Slim::new().with_header(false), &mut buf, &Fixint(1_usize)).unwrap();
+    assert_eq!(buf, [0x01, 0, 0, 0, 0, 0, 0, 0]);
+
+    let mut buf = Vec::new();
+    serialize(Slim::new().with_header(false), &mut buf, &Fixint(-1_isize)).unwrap();
+    assert_eq!(buf, [0xff; 8]);
+
+    // A value exceeding the pointer width of this system is rejected.
+    let too_big = u64::from(u32::MAX) + 1;
+    let deser =
+        deserialize::<_, Fixint<usize>, false>(Slim::new().with_header(false), too_big.to_le_bytes().as_slice());
+    if usize::BITS >= 64 {
+        assert_eq!(deser.unwrap(), Fixint(too_big as usize));
+    } else {
+        assert!(matches!(deser, Err(Error::Custom(_))));
+    }
 }
 
 // =============================================================================
