@@ -8,10 +8,10 @@ Postbag encodes one schema-defined value as a byte sequence. The schema determin
 type and structure of every value; type information is not included in the encoded data.
 Record fields and variant tags carry identifiers.
 
-A document begins with a header stating the version of the data format, as specified in
-Section 8.1. The format does not define transport framing, compression, encryption, or
-checksums. The [Postbag Slim format](POSTBAG-SLIM.md) is outside the scope of this
-document.
+A document normally begins with a header stating the version of the data format, as
+specified in Section 8.1. The format does not define transport framing, compression,
+encryption, or checksums. The [Postbag Slim format](POSTBAG-SLIM.md) is outside the scope
+of this document.
 
 The key words **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are to be interpreted as
 described in RFC 2119.
@@ -207,8 +207,8 @@ any other discriminant.
 ### 7.3 Transparent wrappers
 
 A transparent wrapper contributes no bytes. Its contained value is encoded in its place
-and inherits block-final position. A recoverable value, specified in Section 7.9, is a
-transparent wrapper that is in addition bounded by a block where nothing else bounds it.
+and inherits block-final position. A recoverable value, specified in Section 7.9, uses
+transparent wrapping but adds a block unless an enclosing block already bounds it.
 
 ### 7.4 Tuples and fixed-size arrays
 
@@ -318,34 +318,33 @@ MUST reject any other announcement byte.
 
 ### 7.9 Recoverable values
 
-A recoverable value is bounded so that a decoder that fails to decode it can step over it
-and continue with the values that follow, instead of abandoning the enclosing value as
-well:
+A recoverable value is bounded so that, if decoding fails, a decoder can skip it and
+continue with the values that follow:
 
 ```
 recoverable(T) := value(T, true)          ; block-final
                 | block(value(T, true))   ; otherwise
 ```
 
-In block-final position the enclosing block already bounds the value, so no block is
+In block-final position, the enclosing block already bounds the value, so no block is
 introduced and the encoding is the one the value has without the wrapper. Everywhere else
 a block is introduced and the value is block-final within it.
 
-The schema states which values are recoverable. The encoding carries no mark of its own,
-so an encoder and a decoder MUST agree on which values these are.
+The schema identifies recoverable values. The encoding includes no marker, so an encoder
+and a decoder MUST agree on which values are recoverable.
 
-A decoder that fails to decode a recoverable value MUST close every block it opened while
-decoding that value, up to and including the block introduced here, and MAY then
-substitute a value of its own choosing. A decoder MUST NOT substitute a value when the
-failure leaves the position of the following data unknown, as it does when the underlying
-byte source fails; it MUST report such a failure instead.
+A decoder that fails to decode a recoverable value MUST close every block opened while
+decoding it, through the block that bounds the value. The decoder MAY then substitute
+another value. If the failure leaves the position of the following data unknown, as when
+the underlying byte source fails, the decoder MUST report the failure and MUST NOT
+substitute a value.
 
 ## 8. Document encoding
 
 ### 8.1 Header
 
-A document begins with a two-byte header stating the version of the data format and
-whether identifiers are serialized:
+A document header is two bytes and states the version of the data format and whether
+identifiers are serialized:
 
 ```
 header := ba flags
@@ -361,38 +360,33 @@ The bits of `flags` are:
 
 In version 1.0 of this format the header is therefore `ba b1`.
 
-No UTF-8 encoded text begins with `0xba`, so text presented to a decoder in place of a
-document is always rejected rather than misread.
-
 Version `0` identifies Postbag 0.4 and earlier, which has no header, and version `15` is
 reserved to introduce an extended version encoding. An encoder MUST NOT write either as
 the version.
 
-A decoder MUST reject a document whose first byte is not `0xba`, whose fixed bits are not
-`0b101`, whose version it does not implement, or whose identifiers bit does not match the
-format it decodes. The identifiers bit is `0` in the
-[Postbag Slim format](POSTBAG-SLIM.md), so the header tells the two formats apart.
+A decoder expecting a header MUST reject a document whose first byte is not `0xba`, whose
+fixed bits are not `0b101`, whose version it does not implement, or whose identifiers bit
+does not match the format it decodes.
 
 ### 8.2 Root value
 
-A Postbag document is a header followed by the encoding of exactly one value:
+A Postbag document encodes exactly one value and normally includes a header:
 
 ```
 document := header value(root_type, false)
+          | value(root_type, false)          ; header omission agreed out of band
 ```
 
 The root value is not block-final. No byte length or terminator is included.
 
-An encoder SHOULD write the header. It MAY omit it where the format and the version are
-agreed out of band, as when a connection settles them once and then carries many small
-documents; a document is then the root value alone, and a decoder MUST be told beforehand
-that no header precedes it. Data written without a header cannot be told apart from data
-of another format or another version afterward.
+An encoder SHOULD write the header. It MAY omit the header when the format and version are
+agreed out of band. A decoder MUST know beforehand whether a header is present.
 
 ## 9. Grammar summary
 
 ```
 document              := header value(root_type, false)
+                       | value(root_type, false)                 ; agreed header omission
 
 header                := ba flags                              ; flags = 0b101 <idents:1>
                                                                ;               <version:4>
