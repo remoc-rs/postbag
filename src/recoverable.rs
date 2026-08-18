@@ -294,6 +294,10 @@ impl<'de, T: Deserialize<'de>, P: Recover<T>> Visitor<'de> for RecoverableVisito
     }
 }
 
+/// A value that is deserialized in isolation and implements its own [`Recover::recover`] function
+/// that is called when deserialization fails to provide a replacement value.
+pub type SelfRecoverable<T> = Recoverable<T, T>;
+
 // ============================================================================
 // Functions implementing #[serde(with = "postbag::recoverable::With::<_>")]
 // ============================================================================
