@@ -186,6 +186,9 @@ impl<const WITH_IDENTS: bool> Cfg<WITH_IDENTS> {
     ///
     /// Both ends must use the same version.
     ///
+    /// When deserializing and the [header](Self::with_header) is enabled (default), the Postbag version
+    /// used for serialization is auto-detected.
+    ///
     /// Defaults to this Postbag version.
     pub const fn with_version(self, version: Version) -> Self {
         Self { version, ..self }
