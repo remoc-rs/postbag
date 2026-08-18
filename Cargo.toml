@@ -7,6 +7,7 @@ authors = [
 ]
 edition = "2024"
 readme = "README.md"
+homepage = "https://remoc.rs/postbag/"
 repository = "https://github.com/remoc-rs/postbag"
 description = "💼 Postbag is a high-performance serde codec for Rust that provides efficient data encoding with configurable levels of forward and backward compatibility."
 license = "Apache-2.0"
