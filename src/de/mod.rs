@@ -2,8 +2,9 @@ use deserializer::Deserializer;
 use serde::de::DeserializeOwned;
 
 use crate::{
-    cfg::{Cfg, Full, Slim},
+    cfg::{self, Cfg, Full, Slim},
     error::Result,
+    info,
 };
 
 pub(crate) mod deserializer;
@@ -62,10 +63,12 @@ where
     let cfg = if cfg.header() {
         let mut header = [0; 2];
         read.read_exact(&mut header)?;
-        cfg.with_version(crate::cfg::header::parse(header, WITH_IDENTS)?)
+        cfg.with_version(cfg::header::parse(header, WITH_IDENTS)?)
     } else {
         cfg
     };
+
+    let _info_guard = info::Guard::new(info::Direction::Deserialize, &cfg);
 
     let mut deserializer = Deserializer::<R, WITH_IDENTS>::new(read, cfg);
     let t = T::deserialize(&mut deserializer)?;

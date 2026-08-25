@@ -153,6 +153,7 @@ pub struct Cfg<const WITH_IDENTS: bool> {
     depth_limit: usize,
     version: Version,
     header: bool,
+    allow_skip: bool,
 }
 
 impl<const WITH_IDENTS: bool> Cfg<WITH_IDENTS> {
@@ -163,7 +164,7 @@ impl<const WITH_IDENTS: bool> Cfg<WITH_IDENTS> {
 
     /// Creates a new configuration using default values.
     pub const fn new() -> Self {
-        Self { depth_limit: DEFAULT_DEPTH_LIMIT, version: Version::Postbag1, header: true }
+        Self { depth_limit: DEFAULT_DEPTH_LIMIT, version: Version::Postbag1, header: true, allow_skip: true }
     }
 
     /// Whether struct field identifiers and enum variant identifiers
@@ -208,6 +209,16 @@ impl<const WITH_IDENTS: bool> Cfg<WITH_IDENTS> {
         Self { header, ..self }
     }
 
+    /// Sets whether the data being written may leave out a struct field.
+    ///
+    /// This is what [`skip::is_allowed`](crate::skip::is_allowed) returns
+    /// during serialization.
+    ///
+    /// Defaults to `true`.
+    pub const fn with_allow_skip(self, allow_skip: bool) -> Self {
+        Self { allow_skip, ..self }
+    }
+
     /// The limit for the nesting depth of serialized and deserialized data.
     pub const fn depth_limit(&self) -> usize {
         self.depth_limit
@@ -222,6 +233,14 @@ impl<const WITH_IDENTS: bool> Cfg<WITH_IDENTS> {
     /// The header this configuration writes.
     pub(crate) const fn header_bytes(&self) -> [u8; 2] {
         header::bytes(self.version, WITH_IDENTS)
+    }
+
+    /// Whether the data being written may leave out a struct field.
+    ///
+    /// Per default this is `true`, but *always* `false` under [`Slim`]
+    /// and in a build using the `postbag_fast_compile` configuration.
+    pub const fn allow_skip(&self) -> bool {
+        self.allow_skip && WITH_IDENTS && !cfg!(postbag_fast_compile)
     }
 
     /// The version of the data format.
@@ -243,6 +262,7 @@ impl<const WITH_IDENTS: bool> fmt::Debug for Cfg<WITH_IDENTS> {
             .field("depth_limit", &self.depth_limit)
             .field("version", &self.version)
             .field("header", &self.header())
+            .field("allow_skip", &self.allow_skip())
             .finish()
     }
 }

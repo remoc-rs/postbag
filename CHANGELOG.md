@@ -24,6 +24,9 @@ To be compatible with Postbag 0.4 use `cfg::Version::Postbag0_4`.
 - Optional header with Postbag version (enabled by default)
 - The `fixint` wrapper type is now public as `fixint::Fixint`
 - Added `varfloat` module for variable length encoding of floating point values
+- Added `skip` module providing `skip_serializing_if` predicates that omit a
+  field only when the data can express an omitted field, so that the same type
+  stays compact under `Full` and correct under `Slim`
 - Minimum supported Rust version (MSRV) is 1.95
 
 ## 0.4.3

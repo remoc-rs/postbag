@@ -3,6 +3,7 @@ use serde::Serialize;
 use crate::{
     cfg::{Cfg, Full, Slim},
     error::Result,
+    info,
     ser::serializer::Serializer,
 };
 
@@ -45,6 +46,8 @@ where
     if cfg.header() {
         writer.write_all(&cfg.header_bytes())?;
     }
+
+    let _info_guard = info::Guard::new(info::Direction::Serialize, &cfg);
 
     let mut serializer = Serializer::<W, WITH_IDENTS>::new(writer, cfg);
     // The root value occupies one nesting level, mirroring the deserializer,

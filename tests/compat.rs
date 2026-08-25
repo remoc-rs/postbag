@@ -950,3 +950,150 @@ fn a_name_that_looks_numbered_but_is_not() {
         assert!(bytes.windows(3).any(|w| w == b"_07"), "the name should be written out");
     }
 }
+
+// =============================================================================
+// `skip_serializing_if` tests
+// =============================================================================
+
+/// A struct that omits fields in the first, middle and last position.
+///
+/// Every skippable field also carries a `default`, since a field that is
+/// absent from the data must still be filled in when deserializing.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Default)]
+struct Skipping {
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    first: Option<u32>,
+    second: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    middle: Vec<u8>,
+    third: u64,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    last: Option<String>,
+}
+
+#[test]
+#[cfg_attr(postbag_fast_compile, ignore = "fast_compile does not support omitted fields in the middle")]
+fn skip_serializing_if_full() {
+    // Every combination of present and omitted fields round-trips, because
+    // `Full` identifies each field by name and thus tolerates holes anywhere.
+    for first in [None, Some(1)] {
+        for middle in [Vec::new(), vec![7, 8]] {
+            for last in [None, Some("l".to_string())] {
+                let value = Skipping {
+                    first,
+                    second: "s".to_string(),
+                    middle: middle.clone(),
+                    third: 3,
+                    last: last.clone(),
+                };
+
+                let back: Skipping = transform(&value, Full::new());
+                assert_eq!(back, value, "an omitted field must round-trip under Full");
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(postbag_fast_compile, ignore = "fast_compile does not support omitted fields in the middle")]
+fn skip_serializing_if_full_shrinks_the_data() {
+    let full = Skipping {
+        first: Some(1),
+        second: "s".to_string(),
+        middle: vec![7, 8],
+        third: 3,
+        last: Some("l".to_string()),
+    };
+    let sparse = Skipping { second: "s".to_string(), third: 3, ..Default::default() };
+
+    let full_len = postbag::to_vec(Full::new(), &full).unwrap().len();
+    let sparse_len = postbag::to_vec(Full::new(), &sparse).unwrap().len();
+
+    assert!(sparse_len < full_len, "omitted fields must not be written");
+}
+
+#[test]
+#[cfg_attr(postbag_fast_compile, ignore = "fast_compile does not support omitted fields in the middle")]
+fn skip_serializing_if_full_struct_variant() {
+    #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+    enum E {
+        Variant {
+            #[serde(skip_serializing_if = "Option::is_none", default)]
+            first: Option<u32>,
+            second: u32,
+            #[serde(skip_serializing_if = "Option::is_none", default)]
+            last: Option<u32>,
+        },
+    }
+
+    for first in [None, Some(1)] {
+        for last in [None, Some(9)] {
+            let value = E::Variant { first, second: 2, last };
+            let back: E = transform(&value, Full::new());
+            assert_eq!(back, value, "an omitted variant field must round-trip under Full");
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(postbag_fast_compile, ignore = "fast_compile does not support omitted fields in the middle")]
+fn skip_serializing_if_full_nested() {
+    #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Default)]
+    struct Outer {
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        before: Option<u32>,
+        inner: Skipping,
+        after: u32,
+    }
+
+    let value = Outer { before: None, inner: Skipping { third: 3, ..Default::default() }, after: 4 };
+
+    let back: Outer = transform(&value, Full::new());
+    assert_eq!(back, value, "omitted fields must round-trip when nested");
+}
+
+/// Under `Slim` a field carries no identifier, so an omitted field leaves a
+/// hole that the deserializer cannot see: the fields that follow shift into
+/// its place. Only trailing fields may be omitted.
+#[test]
+fn skip_serializing_if_slim_only_works_at_the_end() {
+    #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Default)]
+    struct Trailing {
+        first: u32,
+        second: u32,
+        #[serde(skip_serializing_if = "is_zero", default)]
+        last: u32,
+    }
+
+    #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Default)]
+    struct Middle {
+        first: u32,
+        #[serde(skip_serializing_if = "is_zero", default)]
+        middle: u32,
+        #[serde(default)]
+        last: u32,
+    }
+
+    fn is_zero(value: &u32) -> bool {
+        *value == 0
+    }
+
+    // A trailing field may be omitted: the field count states where the
+    // fields end and the missing one falls back to its default.
+    let trailing = Trailing { first: 1, second: 2, last: 0 };
+    let bytes = postbag::to_vec(Slim::new(), &trailing).unwrap();
+    let back: Trailing = postbag::from_slice(Slim::new(), bytes.as_slice()).unwrap();
+    assert_eq!(back, trailing, "a trailing omitted field must round-trip under Slim");
+
+    // A field omitted in the middle silently shifts the fields behind it.
+    // Without the `default` on `last` this would at least fail loudly with
+    // "invalid length", but the shift itself goes unnoticed.
+    let middle = Middle { first: 1, middle: 0, last: 7 };
+    let bytes = postbag::to_vec(Slim::new(), &middle).unwrap();
+    let back: Middle = postbag::from_slice(Slim::new(), bytes.as_slice()).unwrap();
+    assert_eq!(
+        back,
+        Middle { first: 1, middle: 7, last: 0 },
+        "Slim cannot express a hole, so the following field takes its place"
+    );
+}
