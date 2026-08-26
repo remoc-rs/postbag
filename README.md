@@ -1,5 +1,6 @@
 # Postbag 💼
 
+[![website](https://img.shields.io/badge/website-remoc.rs%2Fpostbag-blue)](https://remoc.rs/postbag/)
 [![Crates.io](https://img.shields.io/crates/v/postbag.svg)](https://crates.io/crates/postbag)
 [![Documentation](https://docs.rs/postbag/badge.svg)](https://docs.rs/postbag)
 
@@ -7,6 +8,8 @@ Postbag is a compact binary [serde] codec for Rust that keeps the Rust type syst
 fully intact and has support for backwards and forwards compatibility built in.
 This is also known as schema evolution: data written with one version of your types
 remains readable with another.
+
+An illustrated overview is available at [remoc.rs/postbag](https://remoc.rs/postbag/).
 
 ## Quick start
 
