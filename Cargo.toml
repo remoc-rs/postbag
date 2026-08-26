@@ -9,11 +9,11 @@ edition = "2024"
 readme = "README.md"
 homepage = "https://remoc.rs/postbag/"
 repository = "https://github.com/remoc-rs/postbag"
-description = "💼 Postbag is a high-performance serde codec for Rust that provides efficient data encoding with configurable levels of forward and backward compatibility."
+description = "💼 Postbag is a compact binary serde codec for Rust with built-in support for schema evolution. Fields and enum variants can be added, removed and reordered while old and new programs continue to exchange data."
 license = "Apache-2.0"
 rust-version = "1.95"
 categories = ["encoding"]
-keywords = ["serde"]
+keywords = ["serde", "serialization", "binary", "schema-evolution", "codec"]
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }

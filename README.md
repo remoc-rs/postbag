@@ -5,6 +5,8 @@
 
 Postbag is a compact binary [serde] codec for Rust that keeps the Rust type system
 fully intact and has support for backwards and forwards compatibility built in.
+This is also known as schema evolution: data written with one version of your types
+remains readable with another.
 
 ## Quick start
 
