@@ -306,7 +306,7 @@ where
         // already reaches the end of the enclosing block, that block bounds it
         // just as well and nothing is added, making the representation the
         // same as without the wrapper.
-        let block = name == Recoverable::NEWTYPE_NAME && !owns_block;
+        let block = name == Recoverable::NEWTYPE_NAME && !owns_block && !self.version.is_0_4();
         if block {
             self.output.start_skippable();
         }

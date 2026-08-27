@@ -730,7 +730,7 @@ impl<'de, R: Read, const WITH_IDENTS: bool> de::Deserializer<'de> for &mut Deser
     {
         let owns_block = self.takes_block();
 
-        if name != Recoverable::NEWTYPE_NAME {
+        if name != Recoverable::NEWTYPE_NAME || self.version.is_0_4() {
             return self.recurse(owns_block, |de| visitor.visit_newtype_struct(de));
         }
 

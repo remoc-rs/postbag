@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use postbag::{
-    cfg::{Full, Slim},
+    cfg::{Full, Slim, Version},
     from_full_slice, from_slim_slice,
     recoverable::{Recover, Recoverable},
     to_full_vec, to_slim_vec, to_vec,
@@ -551,4 +551,52 @@ fn recovery_nests() {
     assert!(Recoverable::is_recovered(&new.nested.inner));
     assert_eq!(new.nested.n, 9);
     assert_eq!(new.tail, "tail");
+}
+
+/// Version 0.4 encloses no value in a block, so a block written for a
+/// recoverable value could not be recognized by a reader of that version.
+/// The wrapper is therefore left out of the representation entirely, at the
+/// cost of recovery being unavailable.
+#[test]
+fn version_0_4_representation_is_unchanged() {
+    let full = Full::new().with_header(false).with_version(Version::Postbag0_4);
+    let slim = Slim::new().with_header(false).with_version(Version::Postbag0_4);
+
+    assert_eq!(
+        to_vec(full, &plain()).unwrap(),
+        to_vec(full, &wrapped()).unwrap(),
+        "wrapping a field changed the Full representation of version 0.4"
+    );
+    assert_eq!(
+        to_vec(slim, &plain()).unwrap(),
+        to_vec(slim, &wrapped()).unwrap(),
+        "wrapping a field changed the Slim representation of version 0.4"
+    );
+
+    // A value at the top level owns no enclosing block, so it is where a block
+    // would otherwise always be added.
+    assert_eq!(
+        to_vec(full, &b()).unwrap(),
+        to_vec(full, &Recoverable::<B>::new(b())).unwrap(),
+        "wrapping a top level value changed the Full representation of version 0.4"
+    );
+    assert_eq!(
+        to_vec(slim, &b()).unwrap(),
+        to_vec(slim, &Recoverable::<B>::new(b())).unwrap(),
+        "wrapping a top level value changed the Slim representation of version 0.4"
+    );
+}
+
+/// What version 0.4 writes for a wrapped value is read back by both versions of
+/// the reader, so an endpoint that predates the wrapper and one that uses it can
+/// exchange the value.
+#[test]
+fn version_0_4_reads_back_across_the_wrapper() {
+    let full = Full::new().with_header(false).with_version(Version::Postbag0_4);
+
+    let from_plain: Wrapped = postbag::from_slice(full, &to_vec(full, &plain()).unwrap()).unwrap();
+    assert_eq!((from_plain.a, from_plain.b.x, from_plain.c), (1, 42, 2));
+
+    let from_wrapped: Plain = postbag::from_slice(full, &to_vec(full, &wrapped()).unwrap()).unwrap();
+    assert_eq!((from_wrapped.a, from_wrapped.b.x, from_wrapped.c), (1, 42, 2));
 }
