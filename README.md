@@ -11,6 +11,8 @@ remains readable with another.
 
 An illustrated overview is available at [remoc.rs/postbag](https://remoc.rs/postbag/).
 
+[serde]: https://serde.rs
+
 ## Quick start
 
 Normally you will want to use `to_full_vec` and `from_full_slice`:
@@ -143,8 +145,9 @@ The identifier is what a reader matches on, so **changing the id of a field or
 variant is a breaking change**, and an id that has been retired must never be
 given to a different field or variant.
 
-The [`compact`] module provides smaller representations of common standard library
-types, which would otherwise spell out their field and variant names.
+The [`compact`](https://docs.rs/postbag/latest/postbag/compact/index.html) module
+provides smaller representations of common standard library types, which would
+otherwise spell out their field and variant names.
 
 ## Unsupported serde attributes
 
