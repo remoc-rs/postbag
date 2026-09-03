@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.1
+
+- documentation updates
+
 ## 1.0.0
 
 This release includes some serialization format changes. 
