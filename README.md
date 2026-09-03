@@ -72,16 +72,14 @@ The following changes to your types are supported:
 | Remove a variant | anywhere | at the end |
 | Rename a variant | when numbered | always |
 | Reorder variants | yes | no |
-| Change between struct variant and newtype variant holding a struct | yes | yes |
-| Change between tuple variant and newtype variant holding a tuple | yes | yes |
-| Change between unit variant and empty tuple variant | yes | yes |
-| Change between unit variant and empty struct variant | yes | no |
+| Add newtype around a struct variant | yes | yes |
+| Add newtype around a tuple variant | yes | yes |
 | **Field types** | | |
 | Wrap in `Recoverable` | struct fields and newtype variants | no |
 | Change `bool` to `Option<Recoverable<T>>` | struct fields | no |
 | Wrap in or unwrap from a newtype struct | yes | yes |
-| Change between tuple, tuple struct and fixed-size array | yes | yes |
-| Change between `Vec<(K, V)>` and a map | yes | yes |
+| Swap tuples, tuple structs and fixed-size arrays | yes | yes |
+| Swap `Vec<(K, V)>` with a map | yes | yes |
 | **Size** | small | even smaller |
 
 
