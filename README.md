@@ -72,6 +72,16 @@ The following changes to your types are supported:
 | Remove a variant | anywhere | at the end |
 | Rename a variant | when numbered | always |
 | Reorder variants | yes | no |
+| Change between struct variant and newtype variant holding a struct | yes | yes |
+| Change between tuple variant and newtype variant holding a tuple | yes | yes |
+| Change between unit variant and empty tuple variant | yes | yes |
+| Change between unit variant and empty struct variant | yes | no |
+| **Field types** | | |
+| Wrap in `Recoverable` | struct fields and newtype variants | no |
+| Change `bool` to `Option<Recoverable<T>>` | struct fields | no |
+| Wrap in or unwrap from a newtype struct | yes | yes |
+| Change between tuple, tuple struct and fixed-size array | yes | yes |
+| Change between `Vec<(K, V)>` and a map | yes | yes |
 | **Size** | small | even smaller |
 
 
@@ -100,6 +110,10 @@ struct Data {
 
 Should `Details` change incompatibly, `name` and `count` still deserialize correctly
 and `details` becomes `Details::default()`.
+
+The attribute is equivalent to wrapping the field type in `Recoverable<Details>`, and
+both encode the same as the plain field type. Custom recovery policies are also
+available; see the [`recoverable`](https://docs.rs/postbag/latest/postbag/recoverable/index.html) module for details.
 
 ## Numbered identifiers
 
