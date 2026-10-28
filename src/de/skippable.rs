@@ -1,7 +1,7 @@
 //! Skippable blocks reader.
 
 use std::{
-    io::{ErrorKind, Read},
+    io::{self, ErrorKind, Read},
     mem,
 };
 
@@ -12,6 +12,9 @@ use crate::{
 
 /// How much is allocated up front for a read whose length the input claims
 /// but has not yet delivered.
+///
+/// Larger reads allocate further as the data arrives, so the allocation never
+/// exceeds about twice the data delivered.
 const READ_CHUNK: usize = 64 * 1024;
 
 /// Reader that allows blocks to be (partially) skipped.
@@ -173,18 +176,45 @@ enum SkipStack<R> {
 
 impl<R: Read> SkipStack<R> {
     pub fn read(&mut self, ct: usize) -> Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        self.read_into(&mut buf, ct)?;
+        Ok(buf)
+    }
+
+    /// Appends `ct` bytes to `buf`.
+    ///
+    /// The bytes are read into the spare capacity of `buf`, so that they are
+    /// not copied through intermediate buffers.
+    fn read_into(&mut self, buf: &mut Vec<u8>, ct: usize) -> Result<()> {
         match self {
             Self::Base(base) => {
-                let mut buf = Vec::new();
-                while buf.len() < ct {
-                    let chunk = (ct - buf.len()).min(READ_CHUNK);
-                    let start = buf.len();
-                    buf.resize(start + chunk, 0);
-                    base.read_exact(&mut buf[start..])?;
+                let end = buf.len() + ct;
+                while buf.len() < end {
+                    let chunk = (end - buf.len()).min(READ_CHUNK);
+                    buf.reserve(chunk);
+                    let n = base.by_ref().take(chunk as u64).read_to_end(buf)?;
+                    if n < chunk {
+                        return Err(io::Error::from(ErrorKind::UnexpectedEof).into());
+                    }
                 }
-                Ok(buf)
+                Ok(())
             }
-            Self::SkipBlock(sb) => sb.read(ct),
+            Self::SkipBlock(sb) => sb.read_into(buf, ct),
+            Self::Dummy => unreachable!(),
+        }
+    }
+
+    /// Reads and discards `ct` bytes.
+    fn skip(&mut self, ct: usize) -> Result<()> {
+        match self {
+            Self::Base(base) => {
+                let n = io::copy(&mut base.by_ref().take(ct as u64), &mut io::sink())?;
+                if n < ct as u64 {
+                    return Err(io::Error::from(ErrorKind::UnexpectedEof).into());
+                }
+                Ok(())
+            }
+            Self::SkipBlock(sb) => sb.skip(ct),
             Self::Dummy => unreachable!(),
         }
     }
@@ -271,16 +301,8 @@ impl<R: Read> SkipBlock<R> {
         Ok(byte)
     }
 
-    fn read(&mut self, mut ct: usize) -> Result<Vec<u8>> {
-        self.update_remaining()?;
-
-        if self.remaining >= ct {
-            let buf = self.inner.read(ct)?;
-            self.remaining -= ct;
-            return Ok(buf);
-        }
-
-        let mut buf = Vec::with_capacity(ct.min(READ_CHUNK));
+    /// Appends `ct` bytes to `buf`, following continuation blocks as needed.
+    fn read_into(&mut self, buf: &mut Vec<u8>, mut ct: usize) -> Result<()> {
         while ct > 0 {
             self.update_remaining()?;
 
@@ -289,12 +311,30 @@ impl<R: Read> SkipBlock<R> {
             }
 
             let n = ct.min(self.remaining);
-            buf.extend(&self.inner.read(n)?);
+            self.inner.read_into(buf, n)?;
             self.remaining -= n;
             ct -= n;
         }
 
-        Ok(buf)
+        Ok(())
+    }
+
+    /// Reads and discards `ct` bytes, following continuation blocks as needed.
+    fn skip(&mut self, mut ct: usize) -> Result<()> {
+        while ct > 0 {
+            self.update_remaining()?;
+
+            if self.remaining == 0 {
+                return Err(Error::EndOfBlock);
+            }
+
+            let n = ct.min(self.remaining);
+            self.inner.skip(n)?;
+            self.remaining -= n;
+            ct -= n;
+        }
+
+        Ok(())
     }
 
     fn finish(mut self) -> Result<SkipStack<R>> {
@@ -302,7 +342,7 @@ impl<R: Read> SkipBlock<R> {
             self.update_remaining()?;
 
             if self.remaining > 0 {
-                self.inner.read(self.remaining)?;
+                self.inner.skip(self.remaining)?;
                 self.remaining = 0;
             } else {
                 break;
@@ -326,8 +366,7 @@ impl<R: Read> SkipBlock<R> {
             if self.remaining == 0 {
                 break;
             }
-            let chunk = self.inner.read(self.remaining)?;
-            buf.extend(chunk);
+            self.inner.read_into(&mut buf, self.remaining)?;
             self.remaining = 0;
         }
         Ok(buf)
