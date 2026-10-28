@@ -1,21 +1,15 @@
 //! Skippable blocks reader.
 
 use std::{
-    io::{self, ErrorKind, Read},
+    io::{self, ErrorKind},
     mem,
 };
 
 use crate::{
     Error, Result,
+    de::input::Input,
     varint::{max_of_last_byte, varint_max},
 };
-
-/// How much is allocated up front for a read whose length the input claims
-/// but has not yet delivered.
-///
-/// Larger reads allocate further as the data arrives, so the allocation never
-/// exceeds about twice the data delivered.
-const READ_CHUNK: usize = 64 * 1024;
 
 /// Reader that allows blocks to be (partially) skipped.
 pub struct SkipRead<R> {
@@ -26,7 +20,7 @@ pub struct SkipRead<R> {
     failure: Option<ErrorKind>,
 }
 
-impl<R: Read> SkipRead<R> {
+impl<R: Input> SkipRead<R> {
     /// Creates a new skip stack.
     /// A reader over the bytes of exactly one value.
     ///
@@ -64,8 +58,21 @@ impl<R: Read> SkipRead<R> {
     }
 
     /// Read `cnt` bytes.
+    ///
+    /// When the input tells how much it holds, the memory for them is reserved
+    /// at once, and a length beyond it fails before anything is reserved.
     pub fn read(&mut self, cnt: usize) -> Result<Vec<u8>> {
-        let res = self.stack.read(cnt);
+        let res = (|| {
+            let mut buf = Vec::new();
+            if let Some(limit) = self.stack.limit() {
+                if cnt > limit {
+                    return Err(io::Error::from(ErrorKind::UnexpectedEof).into());
+                }
+                buf.reserve_exact(cnt);
+            }
+            self.stack.read_into(&mut buf, cnt)?;
+            Ok(buf)
+        })();
         self.note_failure(res)
     }
 
@@ -134,9 +141,7 @@ impl<R: Read> SkipRead<R> {
     /// Returns the raw bytes contained within the skippable block.
     pub fn read_skippable_block(&mut self) -> Result<Vec<u8>> {
         self.start_skippable();
-        let SkipStack::SkipBlock(sb) = &mut self.stack else { unreachable!() };
-        let res = sb.read_all();
-        let data = self.note_failure(res)?;
+        let data = self.read_rest()?;
         self.end_skippable()?;
         Ok(data)
     }
@@ -155,16 +160,22 @@ impl<R: Read> SkipRead<R> {
 
     /// Reads the remainder of the innermost open skippable block.
     ///
-    /// Only ever called for a value that reaches the end of its block, which
-    /// is why there is always a block open: the reader would otherwise have
-    /// no boundary to read up to, and reading the rest of the input instead
-    /// would swallow whatever follows the value.
+    /// Only ever called for a value that reaches the end of its block, or for
+    /// the contents of a block as a whole, which is why there is always a block
+    /// open: the reader would otherwise have no boundary to read up to, and
+    /// reading the rest of the input instead would swallow whatever follows.
+    ///
+    /// Memory reserved beyond what was read is released unless it is small.
     pub fn read_rest(&mut self) -> Result<Vec<u8>> {
-        let res = match &mut self.stack {
-            SkipStack::SkipBlock(sb) => sb.read_all(),
-            SkipStack::Base(_) | SkipStack::Dummy => unreachable!("no block to read to the end of"),
-        };
-        self.note_failure(res)
+        let mut buf = Vec::new();
+        let SkipStack::SkipBlock(sb) = &mut self.stack else { unreachable!("no block to read to the end of") };
+        let res = sb.read_all(&mut buf);
+        self.note_failure(res)?;
+
+        if buf.capacity() - buf.len() > buf.len().max(SkipBlock::<R>::MAX_LEN) {
+            buf.shrink_to_fit();
+        }
+        Ok(buf)
     }
 }
 
@@ -174,31 +185,14 @@ enum SkipStack<R> {
     Dummy,
 }
 
-impl<R: Read> SkipStack<R> {
-    pub fn read(&mut self, ct: usize) -> Result<Vec<u8>> {
-        let mut buf = Vec::new();
-        self.read_into(&mut buf, ct)?;
-        Ok(buf)
-    }
-
+impl<R: Input> SkipStack<R> {
     /// Appends `ct` bytes to `buf`.
     ///
     /// The bytes are read into the spare capacity of `buf`, so that they are
     /// not copied through intermediate buffers.
     fn read_into(&mut self, buf: &mut Vec<u8>, ct: usize) -> Result<()> {
         match self {
-            Self::Base(base) => {
-                let end = buf.len() + ct;
-                while buf.len() < end {
-                    let chunk = (end - buf.len()).min(READ_CHUNK);
-                    buf.reserve(chunk);
-                    let n = base.by_ref().take(chunk as u64).read_to_end(buf)?;
-                    if n < chunk {
-                        return Err(io::Error::from(ErrorKind::UnexpectedEof).into());
-                    }
-                }
-                Ok(())
-            }
+            Self::Base(base) => Ok(base.read_into(buf, ct)?),
             Self::SkipBlock(sb) => sb.read_into(buf, ct),
             Self::Dummy => unreachable!(),
         }
@@ -207,14 +201,17 @@ impl<R: Read> SkipStack<R> {
     /// Reads and discards `ct` bytes.
     fn skip(&mut self, ct: usize) -> Result<()> {
         match self {
-            Self::Base(base) => {
-                let n = io::copy(&mut base.by_ref().take(ct as u64), &mut io::sink())?;
-                if n < ct as u64 {
-                    return Err(io::Error::from(ErrorKind::UnexpectedEof).into());
-                }
-                Ok(())
-            }
+            Self::Base(base) => Ok(base.skip(ct)?),
             Self::SkipBlock(sb) => sb.skip(ct),
+            Self::Dummy => unreachable!(),
+        }
+    }
+
+    /// How many bytes the input delivers at most, if known.
+    fn limit(&self) -> Option<usize> {
+        match self {
+            Self::Base(base) => base.limit(),
+            Self::SkipBlock(sb) => sb.inner.limit(),
             Self::Dummy => unreachable!(),
         }
     }
@@ -264,7 +261,7 @@ struct SkipBlock<R> {
     has_next_block: bool,
 }
 
-impl<R: Read> SkipBlock<R> {
+impl<R: Input> SkipBlock<R> {
     const MAX_LEN: usize = u16::MAX as usize;
 
     fn new(inner: SkipStack<R>) -> Self {
@@ -359,16 +356,26 @@ impl<R: Read> SkipBlock<R> {
         Ok(self.remaining == 0)
     }
 
-    fn read_all(&mut self) -> Result<Vec<u8>> {
-        let mut buf = Vec::new();
+    /// Appends the remaining contents of the block to `buf`.
+    ///
+    /// The length of the contents is only known piece by piece. A block that
+    /// continues beyond its current piece holds large contents, thus all that
+    /// the input may still deliver is reserved for them when it is known.
+    fn read_all(&mut self, buf: &mut Vec<u8>) -> Result<()> {
         loop {
             self.update_remaining()?;
             if self.remaining == 0 {
                 break;
             }
-            self.inner.read_into(&mut buf, self.remaining)?;
+
+            match self.inner.limit() {
+                Some(limit) if self.has_next_block => buf.reserve_exact(limit),
+                _ => buf.reserve(self.remaining),
+            }
+
+            self.inner.read_into(buf, self.remaining)?;
             self.remaining = 0;
         }
-        Ok(buf)
+        Ok(())
     }
 }

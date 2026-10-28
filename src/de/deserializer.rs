@@ -1,4 +1,4 @@
-use std::{borrow::Cow, collections::HashMap, io::Read, marker::PhantomData};
+use std::{borrow::Cow, collections::HashMap, marker::PhantomData};
 
 use serde::de::{
     self, DeserializeSeed, IntoDeserializer, Visitor,
@@ -8,7 +8,10 @@ use serde::de::{
 use crate::{
     FALSE, MORE, NO_MORE, NONE, SOME, SPECIAL_LEN, TRUE, UNKNOWN_LEN,
     cfg::{Cfg, Version},
-    de::skippable::SkipRead,
+    de::{
+        input::{BufReadInput, Input},
+        skippable::SkipRead,
+    },
     error::{Error, Result},
     id::{ID_BLOCK, ID_LEN, ID_LEN_NAME, numbered_ident},
     recoverable::Recoverable,
@@ -45,7 +48,7 @@ pub struct Deserializer<'de, R, const WITH_IDENTS: bool> {
 
 impl<'de, R, const WITH_IDENTS: bool> Deserializer<'de, R, WITH_IDENTS>
 where
-    R: Read,
+    R: Input,
 {
     /// Obtain a Deserializer from a reader, using the specified configuration.
     pub fn new(read: R, cfg: Cfg<WITH_IDENTS>) -> Self {
@@ -84,7 +87,7 @@ where
     }
 }
 
-impl<'de, R: Read, const WITH_IDENTS: bool> Deserializer<'de, R, WITH_IDENTS> {
+impl<'de, R: Input, const WITH_IDENTS: bool> Deserializer<'de, R, WITH_IDENTS> {
     /// Executes `f` with the nesting depth counter increased by one.
     ///
     /// Fails with [`Error::RecursionLimit`] when the configured depth limit
@@ -259,7 +262,7 @@ struct SeqAccess<'a, 'b, R, const WITH_IDENTS: bool> {
     len: Option<usize>,
 }
 
-impl<'a, 'b: 'a, R: Read, const WITH_IDENTS: bool> serde::de::SeqAccess<'b>
+impl<'a, 'b: 'a, R: Input, const WITH_IDENTS: bool> serde::de::SeqAccess<'b>
     for SeqAccess<'a, 'b, R, WITH_IDENTS>
 {
     type Error = Error;
@@ -293,7 +296,7 @@ struct StructSeqAccess<'a, 'b, R, const WITH_IDENTS: bool> {
     len: usize,
 }
 
-impl<'a, 'b: 'a, R: Read, const WITH_IDENTS: bool> serde::de::SeqAccess<'b>
+impl<'a, 'b: 'a, R: Input, const WITH_IDENTS: bool> serde::de::SeqAccess<'b>
     for StructSeqAccess<'a, 'b, R, WITH_IDENTS>
 {
     type Error = Error;
@@ -327,7 +330,7 @@ struct StructFieldAccess<'a, 'b, R, const WITH_IDENTS: bool> {
     len: Option<usize>,
 }
 
-impl<'a, 'b: 'a, R: Read, const WITH_IDENTS: bool> serde::de::MapAccess<'b>
+impl<'a, 'b: 'a, R: Input, const WITH_IDENTS: bool> serde::de::MapAccess<'b>
     for StructFieldAccess<'a, 'b, R, WITH_IDENTS>
 {
     type Error = Error;
@@ -391,7 +394,7 @@ impl<'de, const WITH_IDENTS: bool> BufferedFieldSeqAccess<'de, WITH_IDENTS> {
     /// so that it is monomorphized only once per (R, CFG) pair, avoiding
     /// code duplication across the many `deserialize_struct` instantiations.
     #[inline(never)]
-    fn new<R: Read>(
+    fn new<R: Input>(
         deser: &mut Deserializer<'_, R, WITH_IDENTS>, fields: &'static [&'static str], len: Option<usize>,
     ) -> Result<Self> {
         // Build index: field name -> position in expected order.
@@ -448,8 +451,8 @@ impl<'de, const WITH_IDENTS: bool> serde::de::SeqAccess<'de> for BufferedFieldSe
                 // The remaining depth budget must be carried over into the
                 // sub-deserializer, otherwise nested structs would each start
                 // with a fresh budget and the limit could not be enforced.
-                let mut deser = Deserializer::<&[u8], WITH_IDENTS>::for_field_value(
-                    raw.as_slice(),
+                let mut deser = Deserializer::<BufReadInput<&[u8]>, WITH_IDENTS>::for_field_value(
+                    BufReadInput::new(raw.as_slice(), Some(raw.len())),
                     raw.len(),
                     self.remaining_depth,
                     self.version,
@@ -473,7 +476,7 @@ struct MapAccess<'a, 'b, R, const WITH_IDENTS: bool> {
     len: Option<usize>,
 }
 
-impl<'a, 'b: 'a, R: Read, const WITH_IDENTS: bool> serde::de::MapAccess<'b>
+impl<'a, 'b: 'a, R: Input, const WITH_IDENTS: bool> serde::de::MapAccess<'b>
     for MapAccess<'a, 'b, R, WITH_IDENTS>
 {
     type Error = Error;
@@ -507,7 +510,7 @@ impl<'a, 'b: 'a, R: Read, const WITH_IDENTS: bool> serde::de::MapAccess<'b>
     }
 }
 
-impl<'de, R: Read, const WITH_IDENTS: bool> de::Deserializer<'de> for &mut Deserializer<'de, R, WITH_IDENTS> {
+impl<'de, R: Input, const WITH_IDENTS: bool> de::Deserializer<'de> for &mut Deserializer<'de, R, WITH_IDENTS> {
     type Error = Error;
 
     fn is_human_readable(&self) -> bool {
@@ -889,7 +892,7 @@ pub struct EnumVariant<'a, 'b, R, const WITH_IDENTS: bool> {
     block: bool,
 }
 
-impl<'a, 'b, R: Read, const WITH_IDENTS: bool> EnumVariant<'a, 'b, R, WITH_IDENTS> {
+impl<'a, 'b, R: Input, const WITH_IDENTS: bool> EnumVariant<'a, 'b, R, WITH_IDENTS> {
     fn finish(self) -> Result<()> {
         self.deserializer.owns_block = false;
 
@@ -901,7 +904,7 @@ impl<'a, 'b, R: Read, const WITH_IDENTS: bool> EnumVariant<'a, 'b, R, WITH_IDENT
     }
 }
 
-impl<'a, 'b: 'a, R: Read, const WITH_IDENTS: bool> serde::de::VariantAccess<'b>
+impl<'a, 'b: 'a, R: Input, const WITH_IDENTS: bool> serde::de::VariantAccess<'b>
     for EnumVariant<'a, 'b, R, WITH_IDENTS>
 {
     type Error = Error;
@@ -935,7 +938,7 @@ impl<'a, 'b: 'a, R: Read, const WITH_IDENTS: bool> serde::de::VariantAccess<'b>
     }
 }
 
-impl<'a, 'de, R: Read, const WITH_IDENTS: bool> serde::de::EnumAccess<'de>
+impl<'a, 'de, R: Input, const WITH_IDENTS: bool> serde::de::EnumAccess<'de>
     for &'a mut Deserializer<'de, R, WITH_IDENTS>
 {
     type Error = Error;

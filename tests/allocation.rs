@@ -227,3 +227,36 @@ fn reading_a_struct_of_numbered_fields() {
         assert_eq!(wide_count, 6, "reading six fields");
     }
 }
+
+#[test]
+fn a_large_byte_array_is_reserved_once() {
+    // The slice tells how much input there is, thus the memory for the bytes is
+    // reserved at once rather than grown as they arrive, which would at times
+    // hold the old and the new allocation together.
+    const SIZE: usize = 4 << 20;
+
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
+    struct Image {
+        name: String,
+        #[serde(with = "serde_bytes")]
+        data: Vec<u8>,
+    }
+
+    for (name, bytes) in [
+        ("full", postbag::to_full_vec(&Image { name: "x".into(), data: vec![7; SIZE] }).unwrap()),
+        ("slim", postbag::to_slim_vec(&Image { name: "x".into(), data: vec![7; SIZE] }).unwrap()),
+    ] {
+        let peak = peak_allocation(|| {
+            let image: Image =
+                if name == "full" { from_full_slice(&bytes).unwrap() } else { from_slim_slice(&bytes).unwrap() };
+            assert_eq!(image.data.len(), SIZE);
+        });
+
+        println!("{name}: peak {peak} bytes for {SIZE} bytes of data");
+
+        // The buffered path holds the bytes of the field besides the value read
+        // from them, each reserved once. Slim fields are not buffered.
+        let copies = if cfg!(postbag_fast_compile) && name == "full" { 2 } else { 1 };
+        assert!(peak < copies * SIZE + SIZE / 8, "{name}: reserved {peak} bytes for {SIZE} bytes of data");
+    }
+}

@@ -31,6 +31,9 @@ const NO_MORE: u8 = 0;
 const SPECIAL_LEN: usize = 125;
 const UNKNOWN_LEN: usize = 0;
 
-pub use de::{deserialize, deserialize_full, deserialize_slim, from_full_slice, from_slice, from_slim_slice};
+pub use de::{
+    deserialize, deserialize_buf_read, deserialize_full, deserialize_slim, from_full_slice, from_slice,
+    from_slim_slice,
+};
 pub use error::{Error, Result};
 pub use ser::{serialize, serialize_full, serialize_slim, to_full_vec, to_slim_vec, to_vec};

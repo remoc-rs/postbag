@@ -1,4 +1,5 @@
 use deserializer::Deserializer;
+use input::{BufReadInput, Input, ReadInput};
 use serde::de::DeserializeOwned;
 
 use crate::{
@@ -8,6 +9,7 @@ use crate::{
 };
 
 pub(crate) mod deserializer;
+mod input;
 mod skippable;
 
 /// Deserialize a value of type `T` from a [`std::io::Read`] using the specified
@@ -55,14 +57,59 @@ mod skippable;
 /// let bytes = to_vec(cfg, &person).unwrap();
 /// let deserialized: Person = deserialize(cfg, bytes.as_slice()).unwrap();
 /// ```
-pub fn deserialize<R, T, const WITH_IDENTS: bool>(cfg: Cfg<WITH_IDENTS>, mut read: R) -> Result<T>
+pub fn deserialize<R, T, const WITH_IDENTS: bool>(cfg: Cfg<WITH_IDENTS>, read: R) -> Result<T>
 where
     R: std::io::Read,
     T: DeserializeOwned,
 {
+    deserialize_input(cfg, ReadInput(read))
+}
+
+/// Deserialize a value of type `T` from a [`std::io::BufRead`] using the specified
+/// configuration.
+///
+/// The data is copied directly out of the buffer of the reader, which is cheaper
+/// than reading from a [`std::io::Read`].
+///
+/// # Example
+///
+/// ```rust
+/// use serde::{Serialize, Deserialize};
+/// use postbag::{to_vec, deserialize_buf_read, cfg::Full};
+///
+/// #[derive(Serialize, Deserialize, Debug, PartialEq)]
+/// struct Image {
+///     name: String,
+///     #[serde(with = "serde_bytes")]
+///     data: Vec<u8>,
+/// }
+///
+/// let image = Image { name: "photo".to_string(), data: vec![7; 100_000] };
+/// let bytes = to_vec(Full::new(), &image).unwrap();
+///
+/// let reader = std::io::BufReader::new(bytes.as_slice());
+/// let deserialized: Image = deserialize_buf_read(Full::new(), reader, Some(bytes.len())).unwrap();
+/// assert_eq!(image, deserialized);
+/// ```
+pub fn deserialize_buf_read<R, T, const WITH_IDENTS: bool>(
+    cfg: Cfg<WITH_IDENTS>, read: R, len: Option<usize>,
+) -> Result<T>
+where
+    R: std::io::BufRead,
+    T: DeserializeOwned,
+{
+    deserialize_input(cfg, BufReadInput::new(read, len))
+}
+
+/// Deserialize a value of type `T` from the input using the specified configuration.
+fn deserialize_input<I, T, const WITH_IDENTS: bool>(cfg: Cfg<WITH_IDENTS>, mut input: I) -> Result<T>
+where
+    I: Input,
+    T: DeserializeOwned,
+{
     let cfg = if cfg.header() {
         let mut header = [0; 2];
-        read.read_exact(&mut header)?;
+        input.read_exact(&mut header)?;
         cfg.with_version(cfg::header::parse(header, WITH_IDENTS)?)
     } else {
         cfg
@@ -70,7 +117,7 @@ where
 
     let _info_guard = info::Guard::new(info::Direction::Deserialize, &cfg);
 
-    let mut deserializer = Deserializer::<R, WITH_IDENTS>::new(read, cfg);
+    let mut deserializer = Deserializer::<I, WITH_IDENTS>::new(input, cfg);
     let t = T::deserialize(&mut deserializer)?;
     deserializer.finalize();
     Ok(t)
@@ -103,7 +150,7 @@ pub fn from_slice<T, const WITH_IDENTS: bool>(cfg: Cfg<WITH_IDENTS>, slice: &[u8
 where
     T: DeserializeOwned,
 {
-    deserialize(cfg, slice)
+    deserialize_buf_read(cfg, slice, Some(slice.len()))
 }
 
 /// Deserialize a value using the [`Full`] configuration.
