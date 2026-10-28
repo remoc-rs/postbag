@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.0
+
+- Added `deserialize_buf_read` for deserializing from a `std::io::BufRead`
+  with fewer copies.
+- Fewer buffer copies during serialization and deserialization.
+
 ## 1.0.1
 
 - documentation updates
