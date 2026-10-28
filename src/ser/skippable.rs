@@ -81,28 +81,35 @@ impl<W: Write> SkipBlock<W> {
         Self { inner: Box::new(inner), buf: Vec::new() }
     }
 
-    fn write(&mut self, data: &[u8]) -> Result<()> {
-        self.buf.extend_from_slice(data);
-        self.flush_buf_if_required()?;
+    /// Writes data, passing every full block on directly.
+    ///
+    /// Only the buffered start of a full block and the data not filling one
+    /// are kept in the buffer, so that large data is not copied into the
+    /// buffer of each enclosing block.
+    fn write(&mut self, mut data: &[u8]) -> Result<()> {
+        while self.buf.len() + data.len() >= Self::MAX_LEN {
+            let n = Self::MAX_LEN - self.buf.len();
+            self.write_len(Self::MAX_LEN)?;
+            if !self.buf.is_empty() {
+                self.inner.write(&self.buf)?;
+                self.buf.clear();
+            }
+            self.inner.write(&data[..n])?;
+            data = &data[n..];
+        }
 
+        self.buf.extend_from_slice(data);
         Ok(())
     }
 
-    fn flush_buf_if_required(&mut self) -> Result<()> {
-        while self.buf.len() >= Self::MAX_LEN {
-            let rem = self.buf.split_off(Self::MAX_LEN);
-            self.flush_buf()?;
-            self.buf = rem;
-        }
-
-        Ok(())
+    fn write_len(&mut self, len: usize) -> Result<()> {
+        let mut len_buf = [0; varint_max::<u16>()];
+        let len_buf = varint_u16(len.try_into().unwrap(), &mut len_buf);
+        self.inner.write(len_buf)
     }
 
     fn flush_buf(&mut self) -> Result<()> {
-        let mut len_buf = [0; varint_max::<u16>()];
-        let len_buf = varint_u16(self.buf.len().try_into().unwrap(), &mut len_buf);
-        self.inner.write(len_buf)?;
-
+        self.write_len(self.buf.len())?;
         self.inner.write(&self.buf)
     }
 
